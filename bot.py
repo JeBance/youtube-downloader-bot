@@ -9,7 +9,8 @@ from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from yt_dlp import YoutubeDL
 
 from config import (
@@ -38,19 +39,29 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Кэш для хранения URL по video_id (для callback)
+url_cache: dict[str, str] = {}
+
 # Паттерн для YouTube URL
 YOUTUBE_PATTERN = re.compile(
     r"(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+"
 )
 
-# Опции для yt-dlp
-YDL_OPTIONS = {
-    "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",  # До 1080p с аудио
-    "outtmpl": str(DOWNLOAD_PATH / "%(id)s.%(ext)s"),
-    "noplaylist": True,  # Не скачивать плейлисты
+# Опции для yt-dlp (только для получения информации)
+YDL_INFO_OPTIONS = {
     "quiet": True,
     "no_warnings": True,
-    "merge_output_format": "mp4",  # Конвертировать в mp4 при слиянии
+    "noplaylist": True,
+}
+
+# Опции для yt-dlp (для загрузки)
+YDL_OPTIONS = {
+    "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+    "outtmpl": str(DOWNLOAD_PATH / "%(id)s.%(ext)s"),
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "merge_output_format": "mp4",
 }
 
 
@@ -59,32 +70,121 @@ def is_youtube_url(url: str) -> bool:
     return bool(YOUTUBE_PATTERN.match(url))
 
 
-async def download_video(url: str) -> Optional[Path]:
+def get_video_info(url: str) -> Optional[dict]:
+    """
+    Получает информацию о видео без загрузки.
+    
+    Returns:
+        dict с информацией о видео или None при ошибке
+    """
+    try:
+        with YoutubeDL(YDL_INFO_OPTIONS) as ydl:
+            return ydl.extract_info(url, download=False)
+    except Exception as e:
+        logger.error(f"Ошибка при получении информации: {e}")
+        return None
+
+
+def build_quality_keyboard(video_id: str, formats: list) -> InlineKeyboardMarkup:
+    """
+    Строит inline-клавиатуру с вариантами качества.
+    
+    Args:
+        video_id: ID видео
+        formats: список кортежей (format_code, description, height)
+    """
+    builder = InlineKeyboardBuilder()
+    
+    for fmt_code, description, height in formats:
+        builder.button(
+            text=f"📹 {description}",
+            callback_data=f"download_{video_id}_{fmt_code}"
+        )
+    
+    builder.button(text="❌ Отмена", callback_data=f"cancel_{video_id}")
+    builder.adjust(2, 2, 1)  # 2 кнопки в ряду
+    return builder.as_markup()
+
+
+def get_available_formats(formats: list) -> list:
+    """
+    Извлекает доступные форматы из информации о видео.
+    
+    Returns:
+        список кортежей (format_code, description, height)
+    """
+    available = []
+    
+    # Фильтруем форматы с видео и аудио
+    for fmt in formats:
+        # Пропускаем аудио-только форматы
+        if fmt.get('vcodec') == 'none':
+            continue
+            
+        height = fmt.get('height', 0)
+        if not height:
+            continue
+            
+        format_id = fmt.get('format_id', '')
+        ext = fmt.get('ext', 'mp4')
+        filesize = fmt.get('filesize', 0) or fmt.get('filesize_approx', 0)
+        
+        # Формируем описание
+        size_str = f" ({filesize / 1024 / 1024:.0f} MB)" if filesize else ""
+        
+        if fmt.get('acodec') != 'none':
+            # Формат с аудио
+            desc = f"{height}p{size_str}"
+            available.append((f"{format_id}+bestaudio", desc, height))
+        else:
+            # Видео без аудио (нужно будет мерджить)
+            desc = f"{height}p{size_str}"
+            available.append((f"{format_id}+bestaudio", desc, height))
+    
+    # Сортируем по высоте (убывание) и убираем дубликаты
+    seen_heights = set()
+    unique = []
+    for fmt in sorted(available, key=lambda x: x[2], reverse=True):
+        if fmt[2] not in seen_heights:
+            seen_heights.add(fmt[2])
+            unique.append(fmt)
+    
+    # Добавляем опцию "только аудио"
+    unique.append(("bestaudio", "🎵 Только аудио", 0))
+    
+    return unique[:5]  # Максимум 5 вариантов + аудио
+
+
+async def download_video(url: str, format_code: str = "best") -> Optional[tuple[Path, str]]:
     """
     Скачивает видео с YouTube.
     
     Args:
         url: Ссылка на YouTube видео
+        format_code: Формат для загрузки (например, "137+bestaudio" для 1080p)
         
     Returns:
-        Путь к скачанному файлу или None при ошибке
+        Кортеж (путь к файлу, название формата) или None при ошибке
     """
     loop = asyncio.get_event_loop()
     
+    options = YDL_OPTIONS.copy()
+    options["format"] = format_code
+    
     def _download():
-        with YoutubeDL(YDL_OPTIONS) as ydl:
+        with YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             # Проверяем существование файла
             if Path(filename).exists():
-                return Path(filename)
-            # Пробуем другие расширения (иногда yt-dlp меняет формат)
+                return Path(filename), info.get('title', 'video')
+            # Пробуем другие расширения
             base = filename.rsplit(".", 1)[0]
             for ext in ["mp4", "webm", "mkv", "m4a"]:
                 candidate = Path(f"{base}.{ext}")
                 if candidate.exists():
-                    return candidate
-            return None
+                    return candidate, info.get('title', 'video')
+            return None, None
     
     try:
         return await asyncio.wait_for(
@@ -93,10 +193,10 @@ async def download_video(url: str) -> Optional[Path]:
         )
     except asyncio.TimeoutError:
         logger.error(f"Таймаут при загрузке: {url}")
-        return None
+        return None, None
     except Exception as e:
         logger.error(f"Ошибка при загрузке: {e}")
-        return None
+        return None, None
 
 
 async def cleanup_file(filepath: Path) -> None:
@@ -182,44 +282,118 @@ async def handle_url(message: types.Message):
     
     logger.info(f"Получена ссылка от {message.from_user.id}: {url}")
     
-    # Отправляем сообщение о начале загрузки
-    status_msg = await message.answer("⏳ Начинаю загрузку видео...")
+    # Получаем информацию о видео
+    status_msg = await message.answer("⏳ Получаю информацию о видео...")
     
-    # Скачиваем видео
-    filepath = await download_video(url)
+    info = get_video_info(url)
     
-    if not filepath:
-        await status_msg.edit_text("❌ Не удалось скачать видео. Проверьте ссылку и попробуйте снова.")
+    if not info:
+        await status_msg.edit_text("❌ Не удалось получить информацию о видео. Проверьте ссылку.")
         return
     
-    # Проверяем размер файла
+    # Извлекаем доступные форматы
+    formats = info.get('formats', [])
+    available = get_available_formats(formats)
+    
+    if not available:
+        await status_msg.edit_text("❌ Нет доступных форматов для загрузки.")
+        return
+    
+    # Формируем информацию о видео
+    title = info.get('title', 'Неизвестно')
+    duration = info.get('duration', 0)
+    duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+    uploader = info.get('uploader', 'Неизвестно')
+    video_id = info.get('id', 'unknown')
+    
+    # Создаём клавиатуру
+    keyboard = build_quality_keyboard(video_id, available)
+    
+    # Сохраняем URL в кэш
+    url_cache[video_id] = url
+    
+    await status_msg.edit_text(
+        f"🎬 **{title}**\n\n"
+        f"👤 {uploader}\n"
+        f"⏱ Длительность: {duration_str}\n\n"
+        f"**Выберите качество:**",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+    logger.info(f"Показаны варианты качества для видео {video_id}")
+
+
+@dp.callback_query(F.data.startswith("download_"))
+async def handle_download(callback: types.CallbackQuery):
+    """Обработчик выбора качества."""
+    # Парсим callback: download_{video_id}_{format_code}
+    parts = callback.data.split("_", 2)
+    if len(parts) < 3:
+        await callback.answer("❌ Ошибка формата", show_alert=True)
+        return
+    
+    video_id = parts[1]
+    format_code = parts[2]
+    
+    # Получаем URL из кэша
+    url = url_cache.get(video_id)
+    if not url:
+        await callback.answer("❌ Ссылка устарела, отправьте заново", show_alert=True)
+        return
+    
+    # Определяем описание качества
+    quality_desc = format_code.replace("+bestaudio", "")
+    if format_code == "bestaudio":
+        quality_desc = "аудио"
+    
+    await callback.message.edit_text(
+        f"{callback.message.text}\n\n⏳ Скачиваю в качестве {quality_desc}...",
+        parse_mode="Markdown"
+    )
+    
+    await callback.answer(f"Начинаю загрузку ({quality_desc})...")
+    
+    # Скачиваем видео
+    filepath, title = await download_video(url, format_code)
+    
+    if not filepath:
+        await callback.message.edit_text(
+            f"{callback.message.text}\n\n❌ Ошибка при загрузке видео."
+        )
+        return
+    
+    # Проверяем размер
     file_size = filepath.stat().st_size
     if file_size > MAX_FILE_SIZE:
         await cleanup_file(filepath)
-        await status_msg.edit_text(
-            f"❌ Файл слишком большой ({file_size / 1024 / 1024:.1f} MB).\n"
-            f"Максимальный размер: {MAX_FILE_SIZE / 1024 / 1024:.0f} MB."
+        await callback.message.edit_text(
+            f"{callback.message.text}\n\n❌ Файл слишком большой ({file_size / 1024 / 1024:.1f} MB)."
         )
         return
     
     # Отправляем видео
-    await status_msg.edit_text("📤 Отправляю видео...")
-    
     try:
         video = FSInputFile(filepath)
-        await message.answer_video(
+        await callback.message.answer_video(
             video,
-            caption="🎬 Видео загружено через YouTube Downloader Bot",
-            parse_mode="Markdown",
-            timeout=SEND_TIMEOUT
+            caption=f"🎬 {title}\n📹 Качество: {quality_desc}",
+            parse_mode="Markdown"
         )
-        await status_msg.delete()
+        await callback.message.delete()
     except Exception as e:
-        logger.error(f"Ошибка при отправке видео: {e}")
-        await status_msg.edit_text(f"❌ Ошибка при отправке: {e}")
+        logger.error(f"Ошибка при отправке: {e}")
+        await callback.message.answer(f"❌ Ошибка при отправке: {e}")
     finally:
-        # Очищаем файл в любом случае
         await cleanup_file(filepath)
+        # Очищаем кэш
+        url_cache.pop(video_id, None)
+
+
+@dp.callback_query(F.data.startswith("cancel_"))
+async def handle_cancel(callback: types.CallbackQuery):
+    """Обработчик отмены загрузки."""
+    await callback.message.delete()
+    await callback.answer("Загрузка отменена")
 
 
 async def main():
