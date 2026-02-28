@@ -6,8 +6,8 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt
-Environment=TELEGRAM_API_ID=2040
-Environment=TELEGRAM_API_HASH=014c333cf59c58239385a7911082353b
+Environment=TELEGRAM_API_ID=93618
+Environment=TELEGRAM_API_HASH=6ac1a760c900b2c0bdd054f15e3522d5
 ExecStart=/opt/telegram-bot-api --local --http-port=8081 --dir=/opt/telegram-bot-api-data --temp-dir=/opt/telegram-bot-api-data/tmp
 Restart=on-failure
 RestartSec=10

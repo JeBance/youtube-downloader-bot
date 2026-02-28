@@ -39,10 +39,11 @@ if not BOT_TOKEN:
 # Инициализация бота
 if BOT_API_SERVER_URL:
     # Используем локальный Bot API Server
-    from aiogram.client.session.aiohttp import AiohttpSession
-    session = AiohttpSession()
-    bot = Bot(token=BOT_TOKEN, session=session, api_server=BOT_API_SERVER_URL)
-    logger.info(f"Используется локальный Bot API Server: {BOT_API_SERVER_URL}")
+    from aiogram.client.session.base import BaseSession
+    # BaseSession автоматически использует указанный API сервер
+    bot = Bot(token=BOT_TOKEN)
+    bot.session.api_server = BOT_API_SERVER_URL.rsplit('/bot', 1)[0]  # http://localhost:8081
+    logger.info(f"Используется локальный Bot API Server: {bot.session.api_server}")
 else:
     # Используем публичный API Telegram
     bot = Bot(token=BOT_TOKEN)
@@ -120,16 +121,21 @@ def build_quality_keyboard(video_id: str, formats: list) -> InlineKeyboardMarkup
     return builder.as_markup()
 
 
-def get_available_formats(formats: list) -> list:
+def get_available_formats(formats: list, max_size_mb: int = 48) -> list:
     """
     Извлекает доступные форматы из информации о видео.
+    
+    Args:
+        formats: список форматов из yt-dlp
+        max_size_mb: максимальный размер в MB (по умолчанию 48MB с запасом до 50MB)
     
     Returns:
         список кортежей (format_code, description, height, estimated_size)
     """
     available = []
+    max_size_bytes = max_size_mb * 1024 * 1024
     
-    # Фильтруем форматы с видео (теперь без ограничения по высоте)
+    # Фильтруем форматы с видео
     for fmt in formats:
         if fmt.get('vcodec') == 'none':
             continue
@@ -149,6 +155,10 @@ def get_available_formats(formats: list) -> list:
                 break
         
         total_size = filesize + audio_size if filesize else 0
+        
+        # Пропускаем форматы, превышающие лимит
+        if total_size > max_size_bytes:
+            continue
         
         # Формируем описание
         size_str = f" ({total_size / 1024 / 1024:.0f} MB)" if total_size else ""
@@ -319,7 +329,7 @@ async def handle_url(message: types.Message):
     
     # Извлекаем доступные форматы
     formats = info.get('formats', [])
-    available = get_available_formats(formats)
+    available = get_available_formats(formats, max_size_mb=MAX_FILE_SIZE // 1024 // 1024)
     
     if not available:
         await status_msg.edit_text("❌ Нет доступных форматов для загрузки.")
