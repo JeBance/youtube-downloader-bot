@@ -1,14 +1,14 @@
 [Unit]
-Description=Telegram Bot API Server
+Description=Telegram Bot API Server (Official TDLib Build)
 After=network.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt
-Environment=TELEGRAM_API_ID=93618
-Environment=TELEGRAM_API_HASH=6ac1a760c900b2c0bdd054f15e3522d5
-ExecStart=/opt/telegram-bot-api --local --http-port=8081 --dir=/opt/telegram-bot-api-data --temp-dir=/opt/telegram-bot-api-data/tmp
+WorkingDirectory=/opt/telegram-bot-api-data
+Environment=TELEGRAM_API_ID=YOUR_API_ID_HERE
+Environment=TELEGRAM_API_HASH=YOUR_API_HASH_HERE
+ExecStart=/usr/local/bin/telegram-bot-api --local --http-port=8081 --dir=/opt/telegram-bot-api-data --temp-dir=/opt/telegram-bot-api-data/tmp
 Restart=on-failure
 RestartSec=10
 
