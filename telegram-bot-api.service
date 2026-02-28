@@ -1,0 +1,22 @@
+[Unit]
+Description=Telegram Bot API Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt
+Environment=TELEGRAM_API_ID=2040
+Environment=TELEGRAM_API_HASH=014c333cf59c58239385a7911082353b
+ExecStart=/opt/telegram-bot-api --local --http-port=8081 --dir=/opt/telegram-bot-api-data --temp-dir=/opt/telegram-bot-api-data/tmp
+Restart=on-failure
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/telegram-bot-api-data
+
+[Install]
+WantedBy=multi-user.target

@@ -15,6 +15,7 @@ from yt_dlp import YoutubeDL
 
 from config import (
     ADMIN_ID,
+    BOT_API_SERVER_URL,
     BOT_TOKEN,
     DOWNLOAD_PATH,
     DOWNLOAD_TIMEOUT,
@@ -36,7 +37,17 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в переменных окружения!")
 
 # Инициализация бота
-bot = Bot(token=BOT_TOKEN)
+if BOT_API_SERVER_URL:
+    # Используем локальный Bot API Server
+    from aiogram.client.session.aiohttp import AiohttpSession
+    session = AiohttpSession()
+    bot = Bot(token=BOT_TOKEN, session=session, api_server=BOT_API_SERVER_URL)
+    logger.info(f"Используется локальный Bot API Server: {BOT_API_SERVER_URL}")
+else:
+    # Используем публичный API Telegram
+    bot = Bot(token=BOT_TOKEN)
+    logger.info("Используется публичный Telegram API")
+
 dp = Dispatcher()
 
 # Кэш для хранения URL по video_id (для callback)
@@ -118,13 +129,13 @@ def get_available_formats(formats: list) -> list:
     """
     available = []
     
-    # Фильтруем форматы с видео
+    # Фильтруем форматы с видео (теперь без ограничения по высоте)
     for fmt in formats:
         if fmt.get('vcodec') == 'none':
             continue
             
         height = fmt.get('height', 0)
-        if not height or height > 720:  # Ограничиваем до 720p
+        if not height:
             continue
             
         format_id = fmt.get('format_id', '')
@@ -142,7 +153,18 @@ def get_available_formats(formats: list) -> list:
         # Формируем описание
         size_str = f" ({total_size / 1024 / 1024:.0f} MB)" if total_size else ""
         
-        desc = f"{height}p{size_str}"
+        # Определяем качество
+        quality_label = f"{height}p"
+        if height >= 2160:
+            quality_label = f"{height}p (4K)"
+        elif height >= 1440:
+            quality_label = f"{height}p (2K)"
+        elif height >= 1080:
+            quality_label = f"{height}p (FHD)"
+        elif height >= 720:
+            quality_label = f"{height}p (HD)"
+        
+        desc = f"{quality_label}{size_str}"
         available.append((f"{format_id}+bestaudio", desc, height, total_size))
     
     # Сортируем по высоте (убывание) и убираем дубликаты
@@ -156,7 +178,7 @@ def get_available_formats(formats: list) -> list:
     # Добавляем опцию "только аудио"
     unique.append(("bestaudio", "🎵 Только аудио", 0, 0))
     
-    return unique[:5]  # Максимум 5 вариантов + аудио
+    return unique[:8]  # Максимум 8 вариантов + аудио
 
 
 async def download_video(url: str, format_code: str = "best") -> Tuple[Optional[Path], Optional[str]]:
