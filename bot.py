@@ -13,6 +13,7 @@ from aiogram.types import FSInputFile
 from yt_dlp import YoutubeDL
 
 from config import (
+    ADMIN_ID,
     BOT_TOKEN,
     DOWNLOAD_PATH,
     DOWNLOAD_TIMEOUT,
@@ -44,11 +45,12 @@ YOUTUBE_PATTERN = re.compile(
 
 # Опции для yt-dlp
 YDL_OPTIONS = {
-    "format": "best[height<=720]/best",  # Максимум 720p для уменьшения размера
+    "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",  # До 1080p с аудио
     "outtmpl": str(DOWNLOAD_PATH / "%(id)s.%(ext)s"),
     "noplaylist": True,  # Не скачивать плейлисты
     "quiet": True,
     "no_warnings": True,
+    "merge_output_format": "mp4",  # Конвертировать в mp4 при слиянии
 }
 
 
@@ -115,7 +117,8 @@ async def cmd_start(message: types.Message):
         "📥 Просто отправь мне ссылку на видео, и я скачаю его для тебя.\n\n"
         "⚙️ Доступные команды:\n"
         "/help — справка\n"
-        "/status — статус бота"
+        "/status — статус бота",
+        parse_mode="Markdown"
     )
     logger.info(f"Команда /start от {message.from_user.id}")
 
@@ -132,7 +135,8 @@ async def cmd_help(message: types.Message):
         "- Максимальный размер файла: 50 MB\n"
         "- Таймаут загрузки: 5 минут\n"
         "- Только отдельные видео (не плейлисты)\n\n"
-        "💡 **Совет:** Для лучших результатов используй короткие видео."
+        "💡 **Совет:** Для лучших результатов используй короткие видео.",
+        parse_mode="Markdown"
     )
     logger.info(f"Команда /help от {message.from_user.id}")
 
@@ -142,6 +146,30 @@ async def cmd_status(message: types.Message):
     """Обработчик команды /status."""
     await message.answer("✅ Бот работает нормально!")
     logger.info(f"Команда /status от {message.from_user.id}")
+
+
+@dp.message(Command("ping"))
+async def cmd_ping(message: types.Message):
+    """Обработчик команды /ping — проверка работоспособности."""
+    await message.answer("🏓 Понг! Бот на связи!")
+    logger.info(f"Команда /ping от {message.from_user.id}")
+
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    """Обработчик команды /admin — только для админа."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    
+    await message.answer(
+        "👤 **Админ-панель**\n\n"
+        f"Ваш ID: `{message.from_user.id}`\n"
+        f"Имя: {message.from_user.full_name}\n"
+        f"Username: @{message.from_user.username or 'нет'}",
+        parse_mode="Markdown"
+    )
+    logger.info(f"Команда /admin от {message.from_user.id}")
 
 
 @dp.message(F.text)
@@ -182,6 +210,7 @@ async def handle_url(message: types.Message):
         await message.answer_video(
             video,
             caption="🎬 Видео загружено через YouTube Downloader Bot",
+            parse_mode="Markdown",
             timeout=SEND_TIMEOUT
         )
         await status_msg.delete()

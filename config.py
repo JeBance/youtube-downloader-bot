@@ -11,6 +11,9 @@ load_dotenv()
 # Токен бота
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# ID администратора
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+
 # Максимальный размер файла (50MB — лимит Telegram)
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 52428800))
 
