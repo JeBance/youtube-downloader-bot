@@ -5,7 +5,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
@@ -91,11 +91,14 @@ def build_quality_keyboard(video_id: str, formats: list) -> InlineKeyboardMarkup
     
     Args:
         video_id: ID видео
-        formats: список кортежей (format_code, description, height)
+        formats: список кортежей (format_code, description, height, estimated_size)
     """
     builder = InlineKeyboardBuilder()
     
-    for fmt_code, description, height in formats:
+    for fmt_code, description, height, est_size in formats:
+        # Проверяем, не превышает ли размер лимит
+        if est_size > MAX_FILE_SIZE:
+            continue  # Пропускаем слишком большие форматы
         builder.button(
             text=f"📹 {description}",
             callback_data=f"download_{video_id}_{fmt_code}"
@@ -111,35 +114,36 @@ def get_available_formats(formats: list) -> list:
     Извлекает доступные форматы из информации о видео.
     
     Returns:
-        список кортежей (format_code, description, height)
+        список кортежей (format_code, description, height, estimated_size)
     """
     available = []
     
-    # Фильтруем форматы с видео и аудио
+    # Фильтруем форматы с видео
     for fmt in formats:
-        # Пропускаем аудио-только форматы
         if fmt.get('vcodec') == 'none':
             continue
             
         height = fmt.get('height', 0)
-        if not height:
+        if not height or height > 720:  # Ограничиваем до 720p
             continue
             
         format_id = fmt.get('format_id', '')
-        ext = fmt.get('ext', 'mp4')
         filesize = fmt.get('filesize', 0) or fmt.get('filesize_approx', 0)
         
-        # Формируем описание
-        size_str = f" ({filesize / 1024 / 1024:.0f} MB)" if filesize else ""
+        # Добавляем аудио-поток к размеру
+        audio_size = 0
+        for audio_fmt in formats:
+            if audio_fmt.get('acodec') != 'none' and audio_fmt.get('vcodec') == 'none':
+                audio_size = audio_fmt.get('filesize', 0) or audio_fmt.get('filesize_approx', 0)
+                break
         
-        if fmt.get('acodec') != 'none':
-            # Формат с аудио
-            desc = f"{height}p{size_str}"
-            available.append((f"{format_id}+bestaudio", desc, height))
-        else:
-            # Видео без аудио (нужно будет мерджить)
-            desc = f"{height}p{size_str}"
-            available.append((f"{format_id}+bestaudio", desc, height))
+        total_size = filesize + audio_size if filesize else 0
+        
+        # Формируем описание
+        size_str = f" ({total_size / 1024 / 1024:.0f} MB)" if total_size else ""
+        
+        desc = f"{height}p{size_str}"
+        available.append((f"{format_id}+bestaudio", desc, height, total_size))
     
     # Сортируем по высоте (убывание) и убираем дубликаты
     seen_heights = set()
@@ -150,12 +154,12 @@ def get_available_formats(formats: list) -> list:
             unique.append(fmt)
     
     # Добавляем опцию "только аудио"
-    unique.append(("bestaudio", "🎵 Только аудио", 0))
+    unique.append(("bestaudio", "🎵 Только аудио", 0, 0))
     
     return unique[:5]  # Максимум 5 вариантов + аудио
 
 
-async def download_video(url: str, format_code: str = "best") -> Optional[tuple[Path, str]]:
+async def download_video(url: str, format_code: str = "best") -> Tuple[Optional[Path], Optional[str]]:
     """
     Скачивает видео с YouTube.
     
@@ -346,8 +350,12 @@ async def handle_download(callback: types.CallbackQuery):
     if format_code == "bestaudio":
         quality_desc = "аудио"
     
+    # Получаем размер из описания
+    size_match = re.search(r'\((\d+) MB\)', callback.message.text)
+    size_info = f" (~{size_match.group(1)} MB)" if size_match else ""
+    
     await callback.message.edit_text(
-        f"{callback.message.text}\n\n⏳ Скачиваю в качестве {quality_desc}...",
+        f"{callback.message.text}\n\n⏳ Скачиваю в качестве {quality_desc}{size_info}...",
         parse_mode="Markdown"
     )
     
