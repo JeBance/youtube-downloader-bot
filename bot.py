@@ -747,7 +747,7 @@ async def cmd_cache_status(message: types.Message):
 async def cmd_cache_clear(message: types.Message):
     """Обработчик команды /clear — очистка кэша."""
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Только администратор может очищать кэш!")
+        await message.answer("⛔ Доступ запрещён!")
         return
     
     count = cache.clear()
@@ -759,7 +759,7 @@ async def cmd_cache_clear(message: types.Message):
 async def cmd_stats(message: types.Message):
     """Обработчик команды /stats — подробная статистика (админ)."""
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Только администратор!")
+        await message.answer("⛔ Доступ запрещён!")
         return
     
     stats = cache.get_detailed_stats()
@@ -807,7 +807,7 @@ async def cmd_stats(message: types.Message):
 async def cmd_broadcast(message: types.Message):
     """Обработчик команды /broadcast — рассылка всем пользователям (админ)."""
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Только администратор!")
+        await message.answer("⛔ Доступ запрещён!")
         return
     
     # Проверяем, есть ли текст после команды
@@ -860,7 +860,7 @@ async def cmd_broadcast(message: types.Message):
 async def cmd_ban(message: types.Message):
     """Обработчик команды /ban — заблокировать пользователя (админ)."""
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Только администратор!")
+        await message.answer("⛔ Доступ запрещён!")
         return
     
     # Проверяем, есть ли ID пользователя
@@ -893,7 +893,7 @@ async def cmd_ban(message: types.Message):
 async def cmd_unban(message: types.Message):
     """Обработчик команды /unban — разблокировать пользователя (админ)."""
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Только администратор!")
+        await message.answer("⛔ Доступ запрещён!")
         return
     
     parts = message.text.split()
@@ -921,7 +921,7 @@ async def cmd_unban(message: types.Message):
 async def cmd_users(message: types.Message):
     """Обработчик команды /users — список всех пользователей (админ)."""
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Только администратор!")
+        await message.answer("⛔ Доступ запрещён!")
         return
     
     users = cache.get_all_users()
