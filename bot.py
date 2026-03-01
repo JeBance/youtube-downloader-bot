@@ -670,17 +670,32 @@ async def handle_url(message: types.Message):
 async def handle_download(callback: types.CallbackQuery):
     """Обработчик выбора качества."""
     # Парсим callback: download_{video_id}_{format_code}
-    parts = callback.data.split("_", 2)
-    if len(parts) < 3:
+    # video_id может содержать подчёркивания, поэтому используем rsplit
+    callback_data = callback.data
+    
+    # Удаляем префикс "download_"
+    if not callback_data.startswith("download_"):
+        await callback.answer("❌ Ошибка формата", show_alert=True)
+        return
+    
+    remainder = callback_data[9:]  # Удаляем "download_"
+    
+    # Находим последнее подчёркивание — оно разделяет video_id и format_code
+    last_underscore = remainder.rfind("_")
+    if last_underscore == -1:
+        await callback.answer("❌ Ошибка формата", show_alert=True)
+        return
+    
+    video_id = remainder[:last_underscore]
+    format_code = remainder[last_underscore + 1:]
+    
+    if not video_id or not format_code:
         await callback.answer("❌ Ошибка формата", show_alert=True)
         return
 
-    video_id = parts[1]
-    format_code = parts[2]
-
     # Получаем URL из кэша (память или БД)
     url = url_cache.get(video_id)
-    
+
     # Если в памяти нет, пробуем получить из базы данных
     if not url:
         url = cache.get_url_for_video(video_id)
@@ -688,8 +703,11 @@ async def handle_download(callback: types.CallbackQuery):
             # Восстанавливаем в памяти для последующих запросов
             url_cache[video_id] = url
             logger.info(f"URL восстановлен из БД для видео {video_id}")
-    
+        else:
+            logger.warning(f"URL не найден в БД для видео {video_id}")
+
     if not url:
+        logger.error(f"Не удалось получить URL для видео {video_id} (callback: {callback.data})")
         await callback.answer("❌ Ссылка устарела, отправьте заново", show_alert=True)
         return
 
