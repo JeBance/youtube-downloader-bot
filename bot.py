@@ -9,14 +9,17 @@ from typing import Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from yt_dlp import YoutubeDL
+
+from database import VideoCache
 
 from config import (
     ADMIN_ID,
     BOT_API_SERVER_URL,
     BOT_TOKEN,
+    CACHE_DB_PATH,
     DOWNLOAD_PATH,
     DOWNLOAD_TIMEOUT,
     LOG_LEVEL,
@@ -39,17 +42,23 @@ if not BOT_TOKEN:
 # Инициализация бота
 if BOT_API_SERVER_URL:
     # Используем локальный Bot API Server
-    from aiogram.client.session.base import BaseSession
-    # BaseSession автоматически использует указанный API сервер
-    bot = Bot(token=BOT_TOKEN)
-    bot.session.api_server = BOT_API_SERVER_URL.rsplit('/bot', 1)[0]  # http://localhost:8081
-    logger.info(f"Используется локальный Bot API Server: {bot.session.api_server}")
+    from aiogram.client.session.aiohttp import AiohttpSession
+    # Извлекаем базовый URL сервера (без /botTOKEN)
+    api_server = BOT_API_SERVER_URL.rsplit('/bot', 1)[0]
+    session = AiohttpSession()
+    session.api_server = api_server
+    bot = Bot(token=BOT_TOKEN, session=session)
+    logger.info(f"Используется локальный Bot API Server: {api_server}")
 else:
     # Используем публичный API Telegram
     bot = Bot(token=BOT_TOKEN)
     logger.info("Используется публичный Telegram API")
 
 dp = Dispatcher()
+
+# Инициализация кэша
+cache = VideoCache(CACHE_DB_PATH)
+logger.info(f"Кэш видео инициализирован: {CACHE_DB_PATH}")
 
 # Кэш для хранения URL по video_id (для callback)
 url_cache: dict[str, str] = {}
@@ -97,24 +106,37 @@ def get_video_info(url: str) -> Optional[dict]:
         return None
 
 
-def build_quality_keyboard(video_id: str, formats: list) -> InlineKeyboardMarkup:
+def build_quality_keyboard(video_id: str, formats: list, cached_formats: list = None) -> InlineKeyboardMarkup:
     """
     Строит inline-клавиатуру с вариантами качества.
-    
+
     Args:
         video_id: ID видео
         formats: список кортежей (format_code, description, height, estimated_size)
+        cached_formats: список (format_code, quality_label) уже закэшированных форматов
     """
     builder = InlineKeyboardBuilder()
+    
+    # Создаём множество закэшированных форматов для быстрой проверки
+    cached_set = set(fmt[0] for fmt in (cached_formats or []))
     
     for fmt_code, description, height, est_size in formats:
         # Проверяем, не превышает ли размер лимит
         if est_size > MAX_FILE_SIZE:
             continue  # Пропускаем слишком большие форматы
-        builder.button(
-            text=f"📹 {description}",
-            callback_data=f"download_{video_id}_{fmt_code}"
-        )
+        
+        # Проверяем, есть ли в кэше
+        if fmt_code in cached_set:
+            # Уже закэшировано — показываем с галочкой
+            builder.button(
+                text=f"✅ {description}",
+                callback_data=f"download_{video_id}_{fmt_code}"
+            )
+        else:
+            builder.button(
+                text=f"📹 {description}",
+                callback_data=f"download_{video_id}_{fmt_code}"
+            )
     
     builder.button(text="❌ Отмена", callback_data=f"cancel_{video_id}")
     builder.adjust(2, 2, 1)  # 2 кнопки в ряду
@@ -330,21 +352,25 @@ async def handle_url(message: types.Message):
     # Извлекаем доступные форматы
     formats = info.get('formats', [])
     available = get_available_formats(formats, max_size_mb=MAX_FILE_SIZE // 1024 // 1024)
-    
+
     if not available:
         await status_msg.edit_text("❌ Нет доступных форматов для загрузки.")
         return
-    
+
     # Формируем информацию о видео
     title = info.get('title', 'Неизвестно')
     duration = info.get('duration', 0)
     duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
     uploader = info.get('uploader', 'Неизвестно')
     video_id = info.get('id', 'unknown')
-    
-    # Создаём клавиатуру
-    keyboard = build_quality_keyboard(video_id, available)
-    
+
+    # Получаем закэшированные форматы
+    cached_formats = cache.get_all_for_video(video_id)
+    logger.info(f"Найдено {len(cached_formats)} закэшированных форматов для видео {video_id}")
+
+    # Создаём клавиатуру с отметками кэша
+    keyboard = build_quality_keyboard(video_id, available, cached_formats)
+
     # Сохраняем URL в кэш
     url_cache[video_id] = url
     
@@ -367,41 +393,58 @@ async def handle_download(callback: types.CallbackQuery):
     if len(parts) < 3:
         await callback.answer("❌ Ошибка формата", show_alert=True)
         return
-    
+
     video_id = parts[1]
     format_code = parts[2]
-    
+
     # Получаем URL из кэша
     url = url_cache.get(video_id)
     if not url:
         await callback.answer("❌ Ссылка устарела, отправьте заново", show_alert=True)
         return
-    
+
+    # Проверяем кэш видео
+    cached = cache.get(video_id, format_code)
+    if cached:
+        # Уже есть в кэше — отправляем по file_id
+        logger.info(f"Отправка из кэша: {video_id} / {format_code}")
+        try:
+            await callback.message.answer_video(
+                video=cached["file_id"],
+                caption=f"🎬 Видео из кэша\n📹 Качество: {format_code}",
+                parse_mode="Markdown"
+            )
+            await callback.answer("✅ Отправлено из кэша")
+        except Exception as e:
+            logger.error(f"Ошибка отправки из кэша: {e}")
+            await callback.answer("❌ Ошибка при отправке из кэша", show_alert=True)
+        return
+
     # Определяем описание качества
     quality_desc = format_code.replace("+bestaudio", "")
     if format_code == "bestaudio":
         quality_desc = "аудио"
-    
+
     # Получаем размер из описания
     size_match = re.search(r'\((\d+) MB\)', callback.message.text)
     size_info = f" (~{size_match.group(1)} MB)" if size_match else ""
-    
+
     await callback.message.edit_text(
         f"{callback.message.text}\n\n⏳ Скачиваю в качестве {quality_desc}{size_info}...",
         parse_mode="Markdown"
     )
-    
+
     await callback.answer(f"Начинаю загрузку ({quality_desc})...")
-    
+
     # Скачиваем видео
     filepath, title = await download_video(url, format_code)
-    
+
     if not filepath:
         await callback.message.edit_text(
             f"{callback.message.text}\n\n❌ Ошибка при загрузке видео."
         )
         return
-    
+
     # Проверяем размер
     file_size = filepath.stat().st_size
     if file_size > MAX_FILE_SIZE:
@@ -410,23 +453,57 @@ async def handle_download(callback: types.CallbackQuery):
             f"{callback.message.text}\n\n❌ Файл слишком большой ({file_size / 1024 / 1024:.1f} MB)."
         )
         return
-    
-    # Отправляем видео
+
+    # Отправляем видео через локальный Bot API Server
     try:
-        video = FSInputFile(filepath)
-        await callback.message.answer_video(
-            video,
-            caption=f"🎬 {title}\n📹 Качество: {quality_desc}",
-            parse_mode="Markdown"
-        )
-        await callback.message.delete()
+        if BOT_API_SERVER_URL:
+            # Используем aiohttp для прямой отправки через локальный API
+            import aiohttp
+            import aiofiles
+
+            # Читаем файл
+            async with aiofiles.open(filepath, 'rb') as f:
+                video_data = await f.read()
+
+            # Отправляем через локальный API
+            api_url = f"{BOT_API_SERVER_URL}/sendVideo"
+
+            data = aiohttp.FormData()
+            data.add_field('chat_id', str(callback.message.chat.id))
+            data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
+            data.add_field('caption', f"🎬 {title}\n📹 Качество: {quality_desc}")
+            data.add_field('parse_mode', 'Markdown')
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, data=data) as response:
+                    result = await response.json()
+                    if not result.get('ok'):
+                        raise Exception(f"Bot API error: {result.get('description', 'Unknown error')}")
+                    
+                    # Сохраняем file_id в кэш
+                    file_id = result.get('result', {}).get('video', {}).get('file_id')
+                    if file_id:
+                        cache.set(video_id, format_code, file_id, file_size, quality_desc)
+                        logger.info(f"Сохранено в кэш: {video_id} / {format_code} → {file_id[:20]}...")
+
+            await callback.message.delete()
+        else:
+            # Публичный API
+            video = FSInputFile(filepath)
+            msg = await callback.message.answer_video(
+                video,
+                caption=f"🎬 {title}\n📹 Качество: {quality_desc}",
+                parse_mode="Markdown"
+            )
+            # Сохраняем file_id в кэш
+            cache.set(video_id, format_code, msg.video.file_id, file_size, quality_desc)
+            logger.info(f"Сохранено в кэш: {video_id} / {format_code}")
+            await callback.message.delete()
     except Exception as e:
         logger.error(f"Ошибка при отправке: {e}")
         await callback.message.answer(f"❌ Ошибка при отправке: {e}")
     finally:
         await cleanup_file(filepath)
-        # Очищаем кэш
-        url_cache.pop(video_id, None)
 
 
 @dp.callback_query(F.data.startswith("cancel_"))
@@ -434,6 +511,43 @@ async def handle_cancel(callback: types.CallbackQuery):
     """Обработчик отмены загрузки."""
     await callback.message.delete()
     await callback.answer("Загрузка отменена")
+
+
+@dp.message(Command("status"))
+async def cmd_cache_status(message: types.Message):
+    """Обработчик команды /status — статистика кэша."""
+    stats = cache.get_stats()
+    
+    # Форматируем размер
+    total_size = stats["total_size"]
+    if total_size > 1024 * 1024 * 1024:
+        size_str = f"{total_size / 1024 / 1024 / 1024:.2f} GB"
+    elif total_size > 1024 * 1024:
+        size_str = f"{total_size / 1024 / 1024:.2f} MB"
+    else:
+        size_str = f"{total_size / 1024:.2f} KB"
+    
+    await message.answer(
+        f"📊 **Статистика кэша:**\n\n"
+        f"🎬 Видео: {stats['total_videos']}\n"
+        f"📹 Форматов: {stats['total_files']}\n"
+        f"💾 Общий размер: {size_str}\n\n"
+        f"_file_id хранятся в Telegram, локальные файлы не хранятся._",
+        parse_mode="Markdown"
+    )
+    logger.info(f"Команда /status от {message.from_user.id}")
+
+
+@dp.message(Command("clear"))
+async def cmd_cache_clear(message: types.Message):
+    """Обработчик команды /clear — очистка кэша."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Только администратор может очищать кэш!")
+        return
+    
+    count = cache.clear()
+    await message.answer(f"🗑 Кэш очищен! Удалено записей: {count}")
+    logger.info(f"Кэш очищен пользователем {message.from_user.id}: {count} записей")
 
 
 async def main():

@@ -25,6 +25,9 @@ MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", DEFAULT_MAX_FILE_SIZE))
 # Путь для загрузок
 DOWNLOAD_PATH = Path(os.getenv("DOWNLOAD_PATH", "/root/git/youtube-downloader-bot/downloads"))
 
+# Путь к базе данных кэша
+CACHE_DB_PATH = Path(os.getenv("CACHE_DB_PATH", "/root/git/youtube-downloader-bot/cache.db"))
+
 # Уровень логирования
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
