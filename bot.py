@@ -723,44 +723,31 @@ async def handle_download(callback: types.CallbackQuery):
         # Если quality_label пустой или равен format_code, определяем по format_code
         if not quality_desc or quality_desc == format_code or quality_desc.isdigit():
             # Определяем качество по format_code
+            # Сначала извлекаем основной format_id (до +)
+            main_format_id = format_code.split('+')[0]
+            
             if format_code == "bestaudio":
                 quality_desc = "Только аудио"
-            # Видео + аудио (merged formats)
-            elif "278" in format_code:
+            # Видео + аудио (merged formats) — сверяем с официальными format codes YouTube
+            # https://github.com/yt-dlp/yt-dlp/wiki/Format-Codes
+            elif main_format_id in ("160", "278"):
                 quality_desc = "144p"
-            elif "242" in format_code or "271" in format_code:
+            elif main_format_id in ("133", "242"):
                 quality_desc = "240p"
-            elif "243" in format_code or "272" in format_code:
+            elif main_format_id in ("134", "243"):
                 quality_desc = "360p"
-            elif "244" in format_code or "135" in format_code:
+            elif main_format_id in ("135", "244"):
                 quality_desc = "480p"
-            elif "247" in format_code or "136" in format_code:
+            elif main_format_id in ("136", "247"):
                 quality_desc = "720p (HD)"
-            elif "248" in format_code or "137" in format_code:
+            elif main_format_id in ("137", "248"):
                 quality_desc = "1080p (FHD)"
-            elif "271" in format_code:
+            elif main_format_id in ("264", "271", "308"):
                 quality_desc = "1440p (2K)"
-            elif "313" in format_code:
-                quality_desc = "2160p (4K)"
-            # Альтернативные format_id
-            elif "160" in format_code:
-                quality_desc = "144p"
-            elif "133" in format_code:
-                quality_desc = "240p"
-            elif "134" in format_code:
-                quality_desc = "360p"
-            elif "135" in format_code:
-                quality_desc = "480p"
-            elif "136" in format_code:
-                quality_desc = "720p (HD)"
-            elif "137" in format_code:
-                quality_desc = "1080p (FHD)"
-            elif "264" in format_code:
-                quality_desc = "1440p (2K)"
-            elif "266" in format_code:
+            elif main_format_id in ("266", "313", "315"):
                 quality_desc = "2160p (4K)"
             else:
-                quality_desc = format_code.replace("+bestaudio", "")
+                quality_desc = main_format_id
         
         # Форматируем длительность
         duration = cached.get("duration", 0)
@@ -803,44 +790,30 @@ async def handle_download(callback: types.CallbackQuery):
         return
 
     # Определяем описание качества для сохранения в кэш
+    # Сначала извлекаем основной format_id (до +)
+    main_format_id = format_code.split('+')[0]
+    
     if format_code == "bestaudio":
         quality_desc = "Только аудио"
-    # Видео + аудио (merged formats)
-    elif "278" in format_code:
+    # Видео + аудио (merged formats) — сверяем с официальными format codes YouTube
+    elif main_format_id in ("160", "278"):
         quality_desc = "144p"
-    elif "242" in format_code or "271" in format_code:
+    elif main_format_id in ("133", "242"):
         quality_desc = "240p"
-    elif "243" in format_code or "272" in format_code:
+    elif main_format_id in ("134", "243"):
         quality_desc = "360p"
-    elif "244" in format_code or "135" in format_code:
+    elif main_format_id in ("135", "244"):
         quality_desc = "480p"
-    elif "247" in format_code or "136" in format_code:
+    elif main_format_id in ("136", "247"):
         quality_desc = "720p (HD)"
-    elif "248" in format_code or "137" in format_code:
+    elif main_format_id in ("137", "248"):
         quality_desc = "1080p (FHD)"
-    elif "271" in format_code:
+    elif main_format_id in ("264", "271", "308"):
         quality_desc = "1440p (2K)"
-    elif "313" in format_code:
-        quality_desc = "2160p (4K)"
-    # Альтернативные format_id
-    elif "160" in format_code:
-        quality_desc = "144p"
-    elif "133" in format_code:
-        quality_desc = "240p"
-    elif "134" in format_code:
-        quality_desc = "360p"
-    elif "135" in format_code:
-        quality_desc = "480p"
-    elif "136" in format_code:
-        quality_desc = "720p (HD)"
-    elif "137" in format_code:
-        quality_desc = "1080p (FHD)"
-    elif "264" in format_code:
-        quality_desc = "1440p (2K)"
-    elif "266" in format_code:
+    elif main_format_id in ("266", "313", "315"):
         quality_desc = "2160p (4K)"
     else:
-        quality_desc = format_code.replace("+bestaudio", "")
+        quality_desc = main_format_id
 
     # Получаем размер из описания
     size_match = re.search(r'\((\d+) MB\)', callback.message.text)
