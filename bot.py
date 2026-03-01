@@ -270,12 +270,20 @@ async def cleanup_file(filepath: Path) -> None:
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     """Обработчик команды /start."""
+    # Добавляем пользователя в базу
+    cache.add_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.full_name
+    )
+    
     await message.answer(
         "👋 Привет! Я бот для загрузки видео из YouTube.\n\n"
         "📥 Просто отправь мне ссылку на видео, и я скачаю его для тебя.\n\n"
         "⚙️ Доступные команды:\n"
         "/help — справка\n"
-        "/status — статус бота",
+        "/status — статус бота\n"
+        "/ping — проверка связи",
         parse_mode="Markdown"
     )
     logger.info(f"Команда /start от {message.from_user.id}")
@@ -334,12 +342,25 @@ async def cmd_admin(message: types.Message):
 async def handle_url(message: types.Message):
     """Обработчик ссылок на YouTube."""
     url = message.text.strip()
-    
+
     if not is_youtube_url(url):
         return  # Игнорируем не-Youtube ссылки
-    
+
+    # Проверяем, не забанен ли пользователь
+    if cache.is_banned(message.from_user.id):
+        await message.answer("🚫 Вы заблокированы администратором!")
+        logger.warning(f"Забаненный пользователь попытался загрузить видео: {message.from_user.id}")
+        return
+
+    # Добавляем/обновляем пользователя
+    cache.add_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.full_name
+    )
+
     logger.info(f"Получена ссылка от {message.from_user.id}: {url}")
-    
+
     # Получаем информацию о видео
     status_msg = await message.answer("⏳ Получаю информацию о видео...")
     
@@ -413,6 +434,11 @@ async def handle_download(callback: types.CallbackQuery):
                 video=cached["file_id"],
                 caption=f"🎬 Видео из кэша\n📹 Качество: {format_code}",
                 parse_mode="Markdown"
+            )
+            # Логируем запрос
+            cache.log_request(
+                callback.from_user.id, video_id, format_code,
+                cached.get("file_size", 0), from_cache=True
             )
             await callback.answer("✅ Отправлено из кэша")
         except Exception as e:
@@ -497,6 +523,8 @@ async def handle_download(callback: types.CallbackQuery):
             )
             # Сохраняем file_id в кэш
             cache.set(video_id, format_code, msg.video.file_id, file_size, quality_desc)
+            # Логируем запрос
+            cache.log_request(callback.from_user.id, video_id, format_code, file_size, from_cache=False)
             logger.info(f"Сохранено в кэш: {video_id} / {format_code}")
             await callback.message.delete()
     except Exception as e:
@@ -548,6 +576,194 @@ async def cmd_cache_clear(message: types.Message):
     count = cache.clear()
     await message.answer(f"🗑 Кэш очищен! Удалено записей: {count}")
     logger.info(f"Кэш очищен пользователем {message.from_user.id}: {count} записей")
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    """Обработчик команды /stats — подробная статистика (админ)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Только администратор!")
+        return
+    
+    stats = cache.get_detailed_stats()
+    top_users = cache.get_top_users(5)
+    
+    # Форматируем размер кэша
+    cache_size = stats["cache_size"]
+    if cache_size > 1024 * 1024 * 1024:
+        size_str = f"{cache_size / 1024 / 1024 / 1024:.2f} GB"
+    elif cache_size > 1024 * 1024:
+        size_str = f"{cache_size / 1024 / 1024:.2f} MB"
+    else:
+        size_str = f"{cache_size / 1024:.2f} KB"
+    
+    # Процент кэш-попаданий
+    total_req = stats["total_requests"]
+    cache_hit_rate = (stats["cache_hits"] / total_req * 100) if total_req > 0 else 0
+    
+    text = (
+        f"📊 **Подробная статистика:**\n\n"
+        f"👥 **Пользователи:**\n"
+        f"   Всего: {stats['total_users']}\n"
+        f"   Активные: {stats['active_users']}\n"
+        f"   Забанены: {stats['banned_users']}\n\n"
+        f"📥 **Запросы:**\n"
+        f"   Всего: {stats['total_requests']}\n"
+        f"   Из кэша: {stats['cache_hits']} ({cache_hit_rate:.1f}%)\n"
+        f"   Загрузок: {stats['cache_misses']}\n\n"
+        f"💾 **Кэш:**\n"
+        f"   Файлов: {stats['cached_files']}\n"
+        f"   Размер: {size_str}\n\n"
+    )
+    
+    if top_users:
+        text += "🏆 **Топ пользователей:**\n"
+        for i, user in enumerate(top_users, 1):
+            name = user.get('username') or user.get('first_name') or f"User {user['user_id']}"
+            text += f"   {i}. {name}: {user['request_count']} запросов\n"
+    
+    await message.answer(text, parse_mode="Markdown")
+    logger.info(f"Команда /stats от {message.from_user.id}")
+
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: types.Message):
+    """Обработчик команды /broadcast — рассылка всем пользователям (админ)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Только администратор!")
+        return
+    
+    # Проверяем, есть ли текст после команды
+    text = message.text.replace("/broadcast", "").strip()
+    if not text:
+        await message.answer(
+            "📢 **Рассылка всем пользователям**\n\n"
+            "Отправь текст сообщения после команды:\n"
+            "`/broadcast Текст сообщения...`\n\n"
+            "Можно использовать Markdown.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Получаем всех пользователей
+    users = cache.get_all_users()
+    banned_count = sum(1 for u in users if u.get('is_banned'))
+    active_users = [u for u in users if not u.get('is_banned')]
+    
+    await message.answer(f"📢 Начинаю рассылку {len(active_users)} пользователям...")
+    
+    success = 0
+    errors = 0
+    
+    for user in active_users:
+        try:
+            await bot.send_message(
+                user['user_id'],
+                f"📢 **Сообщение от админа:**\n\n{text}",
+                parse_mode="Markdown"
+            )
+            success += 1
+        except Exception as e:
+            logger.error(f"Не удалось отправить пользователю {user['user_id']}: {e}")
+            errors += 1
+        
+        # Небольшая задержка чтобы не спамить
+        import asyncio
+        await asyncio.sleep(0.1)
+    
+    await message.answer(
+        f"✅ Рассылка завершена!\n\n"
+        f"Отправлено: {success}\n"
+        f"Ошибок: {errors}"
+    )
+    logger.info(f"Рассылка от {message.from_user.id}: {success} успешно, {errors} ошибок")
+
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: types.Message):
+    """Обработчик команды /ban — заблокировать пользователя (админ)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Только администратор!")
+        return
+    
+    # Проверяем, есть ли ID пользователя
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "🚫 **Бан пользователя**\n\n"
+            "Использование: `/ban user_id`\n\n"
+            "Пример: `/ban 123456789`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Неверный формат ID!")
+        return
+    
+    if user_id == ADMIN_ID:
+        await message.answer("⛔ Нельзя забанить администратора!")
+        return
+    
+    cache.ban_user(user_id)
+    await message.answer(f"🚫 Пользователь {user_id} забанен!")
+    logger.info(f"Пользователь {user_id} забанен админом {message.from_user.id}")
+
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: types.Message):
+    """Обработчик команды /unban — разблокировать пользователя (админ)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Только администратор!")
+        return
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "✅ **Разбан пользователя**\n\n"
+            "Использование: `/unban user_id`\n\n"
+            "Пример: `/unban 123456789`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Неверный формат ID!")
+        return
+    
+    cache.unban_user(user_id)
+    await message.answer(f"✅ Пользователь {user_id} разбанен!")
+    logger.info(f"Пользователь {user_id} разбанен админом {message.from_user.id}")
+
+
+@dp.message(Command("users"))
+async def cmd_users(message: types.Message):
+    """Обработчик команды /users — список всех пользователей (админ)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Только администратор!")
+        return
+    
+    users = cache.get_all_users()
+    
+    if not users:
+        await message.answer("📋 Пользователей пока нет.")
+        return
+    
+    text = f"👥 **Пользователи ({len(users)}):**\n\n"
+    for i, user in enumerate(users[:20], 1):  # Показываем первые 20
+        status = "🚫" if user.get('is_banned') else "✅"
+        name = user.get('username') or user.get('first_name') or f"User {user['user_id']}"
+        text += f"{i}. {status} {name} (`{user['user_id']}`)\n"
+    
+    if len(users) > 20:
+        text += f"\n... и ещё {len(users) - 20} пользователей"
+    
+    await message.answer(text, parse_mode="Markdown")
+    logger.info(f"Команда /users от {message.from_user.id}")
 
 
 async def main():
