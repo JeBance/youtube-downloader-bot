@@ -440,12 +440,24 @@ async def handle_download(callback: types.CallbackQuery):
         # Уже есть в кэше — отправляем по file_id
         logger.info(f"Отправка из кэша: {video_id} / {format_code}")
         
-        # Получаем описание качества
+        # Получаем описание качества из кэша или определяем по format_code
         quality_desc = cached.get("quality_label", "")
-        if not quality_desc:
-            quality_desc = format_code.replace("+bestaudio", "")
-        if format_code == "bestaudio":
-            quality_desc = "аудио"
+        
+        # Если quality_label пустой или равен format_code, определяем по высоте
+        if not quality_desc or quality_desc == format_code or quality_desc.isdigit():
+            # Пытаемся определить качество по format_code
+            if format_code == "bestaudio":
+                quality_desc = "Только аудио"
+            elif "137" in format_code:
+                quality_desc = "1080p (FHD)"
+            elif "136" in format_code:
+                quality_desc = "720p (HD)"
+            elif "135" in format_code:
+                quality_desc = "480p"
+            elif "134" in format_code:
+                quality_desc = "360p"
+            else:
+                quality_desc = format_code.replace("+bestaudio", "")
         
         # Форматируем длительность
         duration = cached.get("duration", 0)
@@ -462,8 +474,7 @@ async def handle_download(callback: types.CallbackQuery):
             f"🎬 **{title}**\n\n"
             f"👤 {uploader}\n"
             f"⏱ Длительность: {duration_str}\n"
-            f"📹 Качество: {quality_desc}\n"
-            f"💾 Из кэша"
+            f"📹 Качество: {quality_desc}"
         )
         
         try:
@@ -479,16 +490,25 @@ async def handle_download(callback: types.CallbackQuery):
             )
             # Удаляем сообщение с кнопками
             await callback.message.delete()
-            await callback.answer("✅ Отправлено из кэша")
+            await callback.answer("✅ Отправлено")
         except Exception as e:
             logger.error(f"Ошибка отправки из кэша: {e}")
             await callback.answer("❌ Ошибка при отправке из кэша", show_alert=True)
         return
 
-    # Определяем описание качества
-    quality_desc = format_code.replace("+bestaudio", "")
+    # Определяем описание качества для сохранения в кэш
     if format_code == "bestaudio":
-        quality_desc = "аудио"
+        quality_desc = "Только аудио"
+    elif "137" in format_code:
+        quality_desc = "1080p (FHD)"
+    elif "136" in format_code:
+        quality_desc = "720p (HD)"
+    elif "135" in format_code:
+        quality_desc = "480p"
+    elif "134" in format_code:
+        quality_desc = "360p"
+    else:
+        quality_desc = format_code.replace("+bestaudio", "")
 
     # Получаем размер из описания
     size_match = re.search(r'\((\d+) MB\)', callback.message.text)
