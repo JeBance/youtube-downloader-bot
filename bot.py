@@ -492,12 +492,15 @@ async def handle_download(callback: types.CallbackQuery):
         else:
             duration_str = "N/A"
         
-        # Формируем красивое описание
+        # Формируем красивое описание со ссылкой на источник
         title = cached.get("title", "Видео")
         uploader = cached.get("uploader", "Неизвестно")
         
+        # Получаем URL из кэша
+        source_url = url_cache.get(video_id, f"https://www.youtube.com/watch?v={video_id}")
+        
         caption = (
-            f"🎬 **{title}**\n\n"
+            f"🎬 **[{title}]({source_url})**\n\n"
             f"👤 {uploader}\n"
             f"⏱ Длительность: {duration_str}\n"
             f"📹 Качество: {quality_desc}"
@@ -608,7 +611,10 @@ async def handle_download(callback: types.CallbackQuery):
             data = aiohttp.FormData()
             data.add_field('chat_id', str(callback.message.chat.id))
             data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
-            data.add_field('caption', f"🎬 {title}\n📹 Качество: {quality_desc}")
+            
+            # Формируем caption со ссылкой на источник
+            caption = f"🎬 **[{title}]({url})**\n📹 Качество: {quality_desc}"
+            data.add_field('caption', caption)
             data.add_field('parse_mode', 'Markdown')
 
             async with aiohttp.ClientSession() as session:
@@ -633,9 +639,13 @@ async def handle_download(callback: types.CallbackQuery):
         else:
             # Публичный API
             video = FSInputFile(filepath)
+            
+            # Формируем caption со ссылкой на источник
+            caption = f"🎬 **[{title}]({url})**\n📹 Качество: {quality_desc}"
+            
             msg = await callback.message.answer_video(
                 video,
-                caption=f"🎬 {title}\n📹 Качество: {quality_desc}",
+                caption=caption,
                 parse_mode="Markdown"
             )
             # Получаем метаданные из кэша
