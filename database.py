@@ -28,9 +28,15 @@ class VideoCache:
                     title TEXT,
                     duration INTEGER,
                     uploader TEXT,
-                    source_url TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(video_id, format_code)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS video_urls (
+                    video_id TEXT PRIMARY KEY,
+                    source_url TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             conn.execute("""
@@ -146,11 +152,30 @@ class VideoCache:
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
-                "SELECT source_url FROM video_cache WHERE video_id = ? LIMIT 1",
+                "SELECT source_url FROM video_urls WHERE video_id = ?",
                 (video_id,)
             )
             row = cursor.fetchone()
             return row[0] if row else None
+
+    def set_url_for_video(self, video_id: str, url: str) -> bool:
+        """
+        Сохранить URL для видео.
+
+        Returns:
+            True если успешно
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO video_urls (video_id, source_url)
+                    VALUES (?, ?)
+                """, (video_id, url))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error saving URL: {e}")
+            return False
     
     def count(self) -> int:
         """Получить количество записей в кэше."""

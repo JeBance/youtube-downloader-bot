@@ -4,7 +4,6 @@ YouTube Downloader Bot — Telegram-бот для загрузки видео и
 import asyncio
 import logging
 import re
-import sqlite3
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -642,12 +641,7 @@ async def handle_url(message: types.Message):
     url_cache[video_id] = url
     
     # Сохраняем URL в базу данных (чтобы не терялся при перезапуске)
-    # Обновляем существующую запись или создаём новую
-    with sqlite3.connect(CACHE_DB_PATH) as conn:
-        conn.execute("""
-            INSERT OR REPLACE INTO video_cache (video_id, format_code, source_url)
-            VALUES (?, '', ?)
-        """, (video_id, url))
+    cache.set_url_for_video(video_id, url)
 
     # Сохраняем метаданные видео
     video_metadata_cache[video_id] = {
