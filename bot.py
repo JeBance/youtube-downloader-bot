@@ -574,8 +574,13 @@ async def handle_download(callback: types.CallbackQuery):
     size_match = re.search(r'\((\d+) MB\)', callback.message.text)
     size_info = f" (~{size_match.group(1)} MB)" if size_match else ""
 
+    # Получаем оригинальное описание (без "Выберите качество:")
+    original_text = callback.message.text
+    if "Выберите качество:" in original_text:
+        original_text = original_text.split("Выберите качество:")[0].strip()
+
     await callback.message.edit_text(
-        f"{callback.message.text}\n\n⏳ Скачиваю в качестве {quality_desc}{size_info}...",
+        f"{original_text}\n\n⏳ Скачиваю в качестве {quality_desc}{size_info}...",
         parse_mode="Markdown"
     )
 
@@ -586,7 +591,7 @@ async def handle_download(callback: types.CallbackQuery):
 
     if not filepath:
         await callback.message.edit_text(
-            f"{callback.message.text}\n\n❌ Ошибка при загрузке видео."
+            f"{original_text}\n\n❌ Ошибка при загрузке видео."
         )
         return
 
@@ -595,7 +600,7 @@ async def handle_download(callback: types.CallbackQuery):
     if file_size > MAX_FILE_SIZE:
         await cleanup_file(filepath)
         await callback.message.edit_text(
-            f"{callback.message.text}\n\n❌ Файл слишком большой ({file_size / 1024 / 1024:.1f} MB)."
+            f"{original_text}\n\n❌ Файл слишком большой ({file_size / 1024 / 1024:.1f} MB)."
         )
         return
 
@@ -687,7 +692,7 @@ async def handle_download(callback: types.CallbackQuery):
             await callback.message.delete()
     except Exception as e:
         logger.error(f"Ошибка при отправке: {e}")
-        await callback.message.answer(f"❌ Ошибка при отправке: {e}")
+        await callback.message.answer(f"{original_text}\n\n❌ Ошибка при отправке: {e}")
     finally:
         await cleanup_file(filepath)
 
