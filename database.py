@@ -13,7 +13,7 @@ class VideoCache:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self._init_db()
-    
+
     def _init_db(self):
         """Инициализация базы данных."""
         with sqlite3.connect(self.db_path) as conn:
@@ -28,6 +28,7 @@ class VideoCache:
                     title TEXT,
                     duration INTEGER,
                     uploader TEXT,
+                    source_url TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(video_id, format_code)
                 )
@@ -97,22 +98,23 @@ class VideoCache:
                 }
             return None
     
-    def set(self, video_id: str, format_code: str, file_id: str, 
-            file_size: int = 0, quality_label: str = "", 
-            title: str = "", duration: int = 0, uploader: str = "") -> bool:
+    def set(self, video_id: str, format_code: str, file_id: str,
+            file_size: int = 0, quality_label: str = "",
+            title: str = "", duration: int = 0, uploader: str = "",
+            source_url: str = "") -> bool:
         """
         Сохранить file_id в кэш.
-        
+
         Returns:
             True если успешно
         """
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
-                    INSERT OR REPLACE INTO video_cache 
-                    (video_id, format_code, file_id, file_size, quality_label, title, duration, uploader)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (video_id, format_code, file_id, file_size, quality_label, title, duration, uploader))
+                    INSERT OR REPLACE INTO video_cache
+                    (video_id, format_code, file_id, file_size, quality_label, title, duration, uploader, source_url)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (video_id, format_code, file_id, file_size, quality_label, title, duration, uploader, source_url))
                 conn.commit()
             return True
         except Exception as e:
@@ -122,7 +124,7 @@ class VideoCache:
     def get_all_for_video(self, video_id: str) -> list:
         """
         Получить все закэшированные форматы для видео.
-        
+
         Returns:
             список (format_code, quality_label)
         """
@@ -134,6 +136,21 @@ class VideoCache:
                 (video_id,)
             )
             return [(row[0], row[1]) for row in cursor.fetchall()]
+
+    def get_url_for_video(self, video_id: str) -> Optional[str]:
+        """
+        Получить URL для видео по video_id.
+
+        Returns:
+            URL или None
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT source_url FROM video_cache WHERE video_id = ? LIMIT 1",
+                (video_id,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
     
     def count(self) -> int:
         """Получить количество записей в кэше."""
@@ -296,15 +313,15 @@ class VideoCache:
             }
     
     def get_top_users(self, limit: int = 10) -> List[dict]:
-        """Получить топ пользователей по количеству запросов."""
+        """Получить топ пользователей по количеству скачанных видео."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
-                SELECT u.user_id, u.username, u.first_name, COUNT(r.id) as request_count
+                SELECT u.user_id, u.username, u.first_name, COUNT(DISTINCT r.video_id) as video_count
                 FROM users u
                 LEFT JOIN requests r ON u.user_id = r.user_id
                 GROUP BY u.user_id
-                ORDER BY request_count DESC
+                ORDER BY video_count DESC
                 LIMIT ?
             """, (limit,))
             return [dict(row) for row in cursor.fetchall()]
