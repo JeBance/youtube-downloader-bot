@@ -405,9 +405,9 @@ async def handle_url(message: types.Message):
         "duration": duration
     }
 
-    # Формируем описание со ссылкой на источник
+    # Формируем описание (без ссылки в названии — ссылка будет в загруженном видео)
     caption = (
-        f"🎬 **[{title}]({url})**\n\n"
+        f"🎬 **{title}**\n\n"
         f"👤 {uploader}\n"
         f"⏱ Длительность: {duration_str}\n\n"
         f"**Выберите качество:**"
