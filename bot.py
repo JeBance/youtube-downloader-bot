@@ -63,6 +63,9 @@ logger.info(f"Кэш видео инициализирован: {CACHE_DB_PATH}"
 # Кэш для хранения URL по video_id (для callback)
 url_cache: dict[str, str] = {}
 
+# Кэш для хранения метаданных видео (title, uploader, duration)
+video_metadata_cache: dict[str, dict] = {}
+
 # Паттерн для YouTube URL
 YOUTUBE_PATTERN = re.compile(
     r"(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+"
@@ -395,6 +398,13 @@ async def handle_url(message: types.Message):
     # Сохраняем URL в кэш
     url_cache[video_id] = url
     
+    # Сохраняем метаданные видео
+    video_metadata_cache[video_id] = {
+        "title": title,
+        "uploader": uploader,
+        "duration": duration
+    }
+    
     await status_msg.edit_text(
         f"🎬 **{title}**\n\n"
         f"👤 {uploader}\n"
@@ -430,17 +440,36 @@ async def handle_download(callback: types.CallbackQuery):
         # Уже есть в кэше — отправляем по file_id
         logger.info(f"Отправка из кэша: {video_id} / {format_code}")
         
-        # Получаем описание качества из кэша
-        quality_desc = cached.get("quality_label", format_code)
-        if not quality_desc or quality_desc == format_code:
+        # Получаем описание качества
+        quality_desc = cached.get("quality_label", "")
+        if not quality_desc:
             quality_desc = format_code.replace("+bestaudio", "")
         if format_code == "bestaudio":
             quality_desc = "аудио"
         
+        # Форматируем длительность
+        duration = cached.get("duration", 0)
+        if duration:
+            duration_str = f"{duration // 60}:{duration % 60:02d}"
+        else:
+            duration_str = "N/A"
+        
+        # Формируем красивое описание
+        title = cached.get("title", "Видео")
+        uploader = cached.get("uploader", "Неизвестно")
+        
+        caption = (
+            f"🎬 **{title}**\n\n"
+            f"👤 {uploader}\n"
+            f"⏱ Длительность: {duration_str}\n"
+            f"📹 Качество: {quality_desc}\n"
+            f"💾 Из кэша"
+        )
+        
         try:
             await callback.message.answer_video(
                 video=cached["file_id"],
-                caption=f"🎬 Видео из кэша\n📹 Качество: {quality_desc}",
+                caption=caption,
                 parse_mode="Markdown"
             )
             # Логируем запрос
@@ -519,7 +548,13 @@ async def handle_download(callback: types.CallbackQuery):
                     # Сохраняем file_id в кэш
                     file_id = result.get('result', {}).get('video', {}).get('file_id')
                     if file_id:
-                        cache.set(video_id, format_code, file_id, file_size, quality_desc)
+                        # Получаем метаданные из кэша
+                        metadata = video_metadata_cache.get(video_id, {})
+                        cache.set(
+                            video_id, format_code, file_id, file_size, quality_desc,
+                            metadata.get('title', ''), metadata.get('duration', 0),
+                            metadata.get('uploader', '')
+                        )
                         logger.info(f"Сохранено в кэш: {video_id} / {format_code} → {file_id[:20]}...")
 
             await callback.message.delete()
@@ -531,8 +566,14 @@ async def handle_download(callback: types.CallbackQuery):
                 caption=f"🎬 {title}\n📹 Качество: {quality_desc}",
                 parse_mode="Markdown"
             )
+            # Получаем метаданные из кэша
+            metadata = video_metadata_cache.get(video_id, {})
             # Сохраняем file_id в кэш
-            cache.set(video_id, format_code, msg.video.file_id, file_size, quality_desc)
+            cache.set(
+                video_id, format_code, msg.video.file_id, file_size, quality_desc,
+                metadata.get('title', ''), metadata.get('duration', 0),
+                metadata.get('uploader', '')
+            )
             # Логируем запрос
             cache.log_request(callback.from_user.id, video_id, format_code, file_size, from_cache=False)
             logger.info(f"Сохранено в кэш: {video_id} / {format_code}")

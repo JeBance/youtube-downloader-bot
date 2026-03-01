@@ -25,6 +25,9 @@ class VideoCache:
                     file_id TEXT NOT NULL,
                     file_size INTEGER,
                     quality_label TEXT,
+                    title TEXT,
+                    duration INTEGER,
+                    uploader TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(video_id, format_code)
                 )
@@ -70,12 +73,12 @@ class VideoCache:
         Получить file_id из кэша.
         
         Returns:
-            dict с file_id, file_size, quality_label или None
+            dict с file_id, file_size, quality_label, title, duration, uploader или None
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT file_id, file_size, quality_label, created_at "
+                "SELECT file_id, file_size, quality_label, title, duration, uploader, created_at "
                 "FROM video_cache "
                 "WHERE video_id = ? AND format_code = ?",
                 (video_id, format_code)
@@ -87,12 +90,16 @@ class VideoCache:
                     "file_id": row["file_id"],
                     "file_size": row["file_size"],
                     "quality_label": row["quality_label"],
+                    "title": row["title"],
+                    "duration": row["duration"],
+                    "uploader": row["uploader"],
                     "created_at": row["created_at"]
                 }
             return None
     
     def set(self, video_id: str, format_code: str, file_id: str, 
-            file_size: int = 0, quality_label: str = "") -> bool:
+            file_size: int = 0, quality_label: str = "", 
+            title: str = "", duration: int = 0, uploader: str = "") -> bool:
         """
         Сохранить file_id в кэш.
         
@@ -103,9 +110,9 @@ class VideoCache:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
                     INSERT OR REPLACE INTO video_cache 
-                    (video_id, format_code, file_id, file_size, quality_label)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (video_id, format_code, file_id, file_size, quality_label))
+                    (video_id, format_code, file_id, file_size, quality_label, title, duration, uploader)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (video_id, format_code, file_id, file_size, quality_label, title, duration, uploader))
                 conn.commit()
             return True
         except Exception as e:
