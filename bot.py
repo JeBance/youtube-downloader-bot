@@ -613,7 +613,17 @@ async def handle_download(callback: types.CallbackQuery):
             data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
             
             # Формируем caption со ссылкой на источник
-            caption = f"🎬 **[{title}]({url})**\n📹 Качество: {quality_desc}"
+            metadata = video_metadata_cache.get(video_id, {})
+            duration = metadata.get('duration', 0)
+            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+            uploader = metadata.get('uploader', 'Неизвестно')
+            
+            caption = (
+                f"🎬 **[{title}]({url})**\n\n"
+                f"👤 {uploader}\n"
+                f"⏱ Длительность: {duration_str}\n"
+                f"📹 Качество: {quality_desc}"
+            )
             data.add_field('caption', caption)
             data.add_field('parse_mode', 'Markdown')
 
@@ -641,7 +651,17 @@ async def handle_download(callback: types.CallbackQuery):
             video = FSInputFile(filepath)
             
             # Формируем caption со ссылкой на источник
-            caption = f"🎬 **[{title}]({url})**\n📹 Качество: {quality_desc}"
+            metadata = video_metadata_cache.get(video_id, {})
+            duration = metadata.get('duration', 0)
+            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+            uploader = metadata.get('uploader', 'Неизвестно')
+            
+            caption = (
+                f"🎬 **[{title}]({url})**\n\n"
+                f"👤 {uploader}\n"
+                f"⏱ Длительность: {duration_str}\n"
+                f"📹 Качество: {quality_desc}"
+            )
             
             msg = await callback.message.answer_video(
                 video,
