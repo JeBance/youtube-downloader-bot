@@ -1,78 +1,249 @@
-# YouTube Downloader Bot
+# 🎬 YouTube Downloader Bot
 
-Telegram-бот для загрузки видео из YouTube.
+Telegram-бот для загрузки видео из YouTube с поддержкой кэширования и выбора качества.
 
-## Возможности
+**Репозиторий:** https://github.com/JeBance/youtube-downloader-bot  
+**Бот:** [@JBaiYouTubeRobot](https://t.me/JBaiYouTubeRobot)
 
-- Загрузка видео по ссылке
-- Выбор формата (видео + аудио или только аудио)
-- Отправка файла пользователю
-- Автоматическая очистка временных файлов
-- Асинхронная обработка запросов
+---
 
-## Установка
+## ✨ Возможности
 
-1. Клонируйте репозиторий:
+- 📹 **Все качества:** 144p – 4K (2160p)
+- 🎵 **Только аудио:** MP3 из видео
+- 💾 **Кэширование:** Повторные запросы мгновенно
+- ✅ **Умные кнопки:** Закэшированные форматы с галочкой
+- 🔗 **Ссылка на источник:** В каждом видео
+- 👑 **Админ-команды:** Статистика, рассылка, бан
+- 🔒 **Безопасность:** Запуск от ytrobot, systemd sandboxing
+- 📦 **До 2GB:** Локальный Bot API Server
+
+---
+
+## 📦 Требования
+
+- Ubuntu 20.04+ / Debian 11+
+- Python 3.9+
+- 512 MB RAM, 2 GB disk
+- ffmpeg (для слияния видео/аудио)
+
+---
+
+## 🚀 Установка
+
+### 1. Зависимости
+
 ```bash
-git clone git@github.com:JeBance/youtube-downloader-bot.git
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3 python3-pip python3-venv git ffmpeg curl
+```
+
+### 2. Клонирование
+
+```bash
+sudo mkdir -p /root/git
+cd /root/git
+git clone https://github.com/JeBance/youtube-downloader-bot.git
 cd youtube-downloader-bot
 ```
 
-2. Создайте виртуальное окружение:
+### 3. Виртуальное окружение
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-```
-
-3. Установите зависимости:
-```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-4. Настройте переменные окружения:
+### 4. Настройка
+
 ```bash
 cp .env.example .env
-# Отредактируйте .env и добавьте ваш токен бота
+nano .env
 ```
 
-5. Установите yt-dlp (опционально, последняя версия):
-```bash
-pip install -U yt-dlp
-```
-
-## Запуск
+**Обязательные переменные:**
 
 ```bash
-python bot.py
+# Токен от @BotFather
+BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+
+# Твой ID (узнать у @userinfobot)
+ADMIN_ID=5610580916
+
+# Локальный Bot API (опционально, для >50MB)
+BOT_API_SERVER_URL=http://localhost:8081/bot1234567890:ABCdef...
+
+# Лимит файла (2GB с локальным API)
+MAX_FILE_SIZE=2147483648
 ```
 
-## Запуск как служба (systemd)
+### 5. Пользователь ytrobot
 
-1. Скопируйте файл службы:
 ```bash
-sudo cp systemd/youtube-bot.service /etc/systemd/system/
+sudo useradd -r -s /bin/false -d /opt/ytrobot -m ytrobot
+sudo chown -R ytrobot:ytrobot /root/git/youtube-downloader-bot
 ```
 
-2. Включите и запустите службу:
+---
+
+## ⚙️ Локальный Bot API Server (для >50MB)
+
+### Сборка из TDLib
+
+```bash
+sudo apt install -y git cmake g++ libssl-dev zlib1g-dev gperf
+
+cd /opt
+git clone --recursive https://github.com/tdlib/telegram-bot-api.git
+cd telegram-bot-api
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+cmake --build . --target install
+
+telegram-bot-api --version
+```
+
+### Настройка службы
+
+```bash
+sudo nano /etc/systemd/system/telegram-bot-api.service
+```
+
+```ini
+[Unit]
+Description=Telegram Bot API Server
+After=network.target
+
+[Service]
+Type=simple
+Environment=TELEGRAM_API_ID=YOUR_API_ID
+Environment=TELEGRAM_API_HASH=YOUR_API_HASH
+ExecStart=/usr/local/bin/telegram-bot-api --local --http-port=8081
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**API_ID и API_HASH:** https://my.telegram.org/auth
+
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable youtube-bot
-sudo systemctl start youtube-bot
+sudo systemctl enable telegram-bot-api
+sudo systemctl start telegram-bot-api
 ```
 
-3. Проверьте статус:
+---
+
+## 💬 Команды
+
+### Пользовательские
+
+| Команда | Описание |
+|---------|----------|
+| `/start` | Приветствие |
+| `/help` | Справка |
+| `/ping` | Проверка |
+| `/status` | Статистика кэша |
+
+### Администратора
+
+| Команда | Описание |
+|---------|----------|
+| `/admin` | Админ-панель |
+| `/clear` | Очистка кэша |
+| `/stats` | Подробная статистика |
+| `/users` | Список пользователей |
+| `/ban` | Забанить |
+| `/unban` | Разбанить |
+| `/broadcast` | Рассылка |
+
+---
+
+## 🔧 ytrobot менеджер
+
 ```bash
-sudo systemctl status youtube-bot
+# Статус
+ytrobot status
+
+# Запуск
+ytrobot start
+
+# Перезапуск
+ytrobot restart
+
+# Логи
+ytrobot logs
+
+# Автозапуск
+ytrobot enable
 ```
 
-## Команды бота
+### Автозапуск
 
-- `/start` — приветствие и инструкция
-- `/help` — справка по использованию
-- Отправьте ссылку на YouTube видео — бот скачает и отправит файл
+```bash
+ytrobot enable
+sudo systemctl start ytrobot
+sudo systemctl status ytrobot
+```
 
-## Требования
+---
 
-- Python 3.9+
-- Telegram Bot Token (получить у @BotFather)
-- Доступ к интернету
+## 📁 Структура
+
+```
+youtube-downloader-bot/
+├── bot.py              # Код бота
+├── config.py           # Конфигурация
+├── database.py         # Кэш SQLite
+├── ytrobot             # Менеджер
+├── requirements.txt    # Зависимости
+├── .env.example        # Шаблон
+├── README.md           # Документация
+└── systemd/            # Службы
+```
+
+---
+
+## 🐛 Troubleshooting
+
+**Бот не запускается:**
+```bash
+ytrobot logs
+journalctl -u ytrobot -f
+```
+
+**Ошибка токена:**
+```bash
+cat .env | grep BOT_TOKEN
+curl "https://api.telegram.org/bot<TOKEN>/getMe"
+```
+
+**Файлы >50MB:**
+```bash
+systemctl status telegram-bot-api
+cat .env | grep MAX_FILE_SIZE
+```
+
+---
+
+## 🔒 Безопасность
+
+- ✅ Запуск от `ytrobot` (не root)
+- ✅ systemd sandboxing
+- ✅ `.env` в `.gitignore`
+- ✅ Админ-команды защищены
+
+---
+
+## 📄 Лицензия
+
+MIT License
+
+---
+
+**Автор:** JeBance  
+**GitHub:** https://github.com/JeBance/youtube-downloader-bot  
+**Telegram:** [@JBaiYouTubeRobot](https://t.me/JBaiYouTubeRobot)
