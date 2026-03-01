@@ -429,10 +429,18 @@ async def handle_download(callback: types.CallbackQuery):
     if cached:
         # Уже есть в кэше — отправляем по file_id
         logger.info(f"Отправка из кэша: {video_id} / {format_code}")
+        
+        # Получаем описание качества из кэша
+        quality_desc = cached.get("quality_label", format_code)
+        if not quality_desc or quality_desc == format_code:
+            quality_desc = format_code.replace("+bestaudio", "")
+        if format_code == "bestaudio":
+            quality_desc = "аудио"
+        
         try:
             await callback.message.answer_video(
                 video=cached["file_id"],
-                caption=f"🎬 Видео из кэша\n📹 Качество: {format_code}",
+                caption=f"🎬 Видео из кэша\n📹 Качество: {quality_desc}",
                 parse_mode="Markdown"
             )
             # Логируем запрос
