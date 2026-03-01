@@ -404,12 +404,17 @@ async def handle_url(message: types.Message):
         "uploader": uploader,
         "duration": duration
     }
-    
-    await status_msg.edit_text(
-        f"🎬 **{title}**\n\n"
+
+    # Формируем описание со ссылкой на источник
+    caption = (
+        f"🎬 **[{title}]({url})**\n\n"
         f"👤 {uploader}\n"
         f"⏱ Длительность: {duration_str}\n\n"
-        f"**Выберите качество:**",
+        f"**Выберите качество:**"
+    )
+
+    await status_msg.edit_text(
+        caption,
         parse_mode="Markdown",
         reply_markup=keyboard
     )
