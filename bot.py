@@ -440,6 +440,8 @@ async def handle_download(callback: types.CallbackQuery):
                 callback.from_user.id, video_id, format_code,
                 cached.get("file_size", 0), from_cache=True
             )
+            # Удаляем сообщение с кнопками
+            await callback.message.delete()
             await callback.answer("✅ Отправлено из кэша")
         except Exception as e:
             logger.error(f"Ошибка отправки из кэша: {e}")
