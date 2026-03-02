@@ -146,29 +146,34 @@ def build_quality_keyboard(video_id: str, formats: list, cached_formats: list = 
     return builder.as_markup()
 
 
-def get_available_formats(formats: list, max_size_mb: int = 48) -> list:
+def get_available_formats(formats: list, max_size_mb: int = 48, max_height: int = 1080) -> list:
     """
     Извлекает доступные форматы из информации о видео.
-    
+
     Args:
         formats: список форматов из yt-dlp
         max_size_mb: максимальный размер в MB (по умолчанию 48MB с запасом до 50MB)
-    
+        max_height: максимальная высота видео (по умолчанию 1080p)
+
     Returns:
         список кортежей (format_code, description, height, estimated_size)
     """
     available = []
     max_size_bytes = max_size_mb * 1024 * 1024
-    
+
     # Фильтруем форматы с видео
     for fmt in formats:
         if fmt.get('vcodec') == 'none':
             continue
-            
+
         height = fmt.get('height', 0)
         if not height:
             continue
-            
+
+        # Пропускаем форматы выше максимального качества
+        if height > max_height:
+            continue
+
         format_id = fmt.get('format_id', '')
         filesize = fmt.get('filesize', 0) or fmt.get('filesize_approx', 0)
         
@@ -187,10 +192,34 @@ def get_available_formats(formats: list, max_size_mb: int = 48) -> list:
         
         # Формируем описание
         size_str = f" ({total_size / 1024 / 1024:.0f} MB)" if total_size else ""
-        
-        # Определяем качество
+
+        # Определяем качество с учётом новых кодеков (по format_id и height)
+        # https://github.com/yt-dlp/yt-dlp/wiki/Format-Codes
         quality_label = f"{height}p"
-        if height >= 2160:
+        
+        # Сначала проверяем format_id для точного определения
+        if format_id in ("160", "278"):
+            quality_label = "144p"
+        elif format_id in ("133", "242"):
+            quality_label = "240p"
+        elif format_id in ("134", "243"):
+            quality_label = "360p"
+        elif format_id in ("135", "244"):
+            quality_label = "480p"
+        elif format_id in ("136", "247"):
+            quality_label = "720p (HD)"
+        elif format_id in ("137", "248"):
+            quality_label = "1080p (FHD)"
+        elif format_id in ("264", "271", "308"):
+            quality_label = "1440p (2K)"
+        elif format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
+            quality_label = "2160p (4K)"
+        elif format_id in ("272", "309", "316"):
+            quality_label = "4320p (8K)"
+        # Если format_id не найден в списке, используем height
+        elif height >= 4320:
+            quality_label = f"{height}p (8K)"
+        elif height >= 2160:
             quality_label = f"{height}p (4K)"
         elif height >= 1440:
             quality_label = f"{height}p (2K)"
@@ -198,7 +227,7 @@ def get_available_formats(formats: list, max_size_mb: int = 48) -> list:
             quality_label = f"{height}p (FHD)"
         elif height >= 720:
             quality_label = f"{height}p (HD)"
-        
+
         desc = f"{quality_label}{size_str}"
         available.append((f"{format_id}+bestaudio", desc, height, total_size))
     
@@ -617,7 +646,7 @@ async def handle_url(message: types.Message):
     
     # Извлекаем доступные форматы
     formats = info.get('formats', [])
-    available = get_available_formats(formats, max_size_mb=MAX_FILE_SIZE // 1024 // 1024)
+    available = get_available_formats(formats, max_size_mb=MAX_FILE_SIZE // 1024 // 1024, max_height=1080)
 
     if not available:
         await status_msg.edit_text("❌ Нет доступных форматов для загрузки.")
@@ -792,10 +821,11 @@ async def handle_download(callback: types.CallbackQuery):
     # Определяем описание качества для сохранения в кэш
     # Сначала извлекаем основной format_id (до +)
     main_format_id = format_code.split('+')[0]
-    
+
     if format_code == "bestaudio":
         quality_desc = "Только аудио"
     # Видео + аудио (merged formats) — сверяем с официальными format codes YouTube
+    # https://github.com/yt-dlp/yt-dlp/wiki/Format-Codes
     elif main_format_id in ("160", "278"):
         quality_desc = "144p"
     elif main_format_id in ("133", "242"):
@@ -810,10 +840,39 @@ async def handle_download(callback: types.CallbackQuery):
         quality_desc = "1080p (FHD)"
     elif main_format_id in ("264", "271", "308"):
         quality_desc = "1440p (2K)"
-    elif main_format_id in ("266", "313", "315"):
+    elif main_format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
+        # AV1 и другие новые кодеки для 4K/8K
         quality_desc = "2160p (4K)"
+    elif main_format_id in ("272", "309", "316"):
+        quality_desc = "4320p (8K)"
     else:
-        quality_desc = main_format_id
+        # Пытаемся определить по высоте из оригинальных данных
+        info = get_video_info(url)
+        if info and 'formats' in info:
+            for fmt in info['formats']:
+                if fmt.get('format_id') == main_format_id:
+                    height = fmt.get('height', 0)
+                    if height >= 4320:
+                        quality_desc = "4320p (8K)"
+                    elif height >= 2160:
+                        quality_desc = "2160p (4K)"
+                    elif height >= 1440:
+                        quality_desc = "1440p (2K)"
+                    elif height >= 1080:
+                        quality_desc = "1080p (FHD)"
+                    elif height >= 720:
+                        quality_desc = "720p (HD)"
+                    elif height >= 480:
+                        quality_desc = "480p"
+                    elif height >= 360:
+                        quality_desc = "360p"
+                    elif height >= 240:
+                        quality_desc = "240p"
+                    else:
+                        quality_desc = "144p"
+                    break
+        if quality_desc == main_format_id:
+            quality_desc = f"{main_format_id} (неизвестно)"
 
     # Получаем размер из описания
     size_match = re.search(r'\((\d+) MB\)', callback.message.text)
@@ -844,8 +903,13 @@ async def handle_download(callback: types.CallbackQuery):
     file_size = filepath.stat().st_size
     if file_size > MAX_FILE_SIZE:
         await cleanup_file(filepath)
+        max_mb = MAX_FILE_SIZE / 1024 / 1024
+        actual_mb = file_size / 1024 / 1024
         await callback.message.edit_text(
-            f"{original_text}\n\n❌ Файл слишком большой ({file_size / 1024 / 1024:.1f} MB)."
+            f"{original_text}\n\n"
+            f"❌ Файл слишком большой ({actual_mb:.1f} MB).\n\n"
+            f"Максимальный размер: {max_mb:.0f} MB.\n"
+            f"Попробуйте выбрать качество ниже."
         )
         return
 
@@ -936,8 +1000,31 @@ async def handle_download(callback: types.CallbackQuery):
             logger.info(f"Сохранено в кэш: {video_id} / {format_code}")
             await callback.message.delete()
     except Exception as e:
-        logger.error(f"Ошибка при отправке: {e}")
-        await callback.message.answer(f"{original_text}\n\n❌ Ошибка при отправке: {e}")
+        error_msg = str(e)
+        logger.error(f"Ошибка при отправке: {error_msg}")
+
+        # Специфичные сообщения для разных ошибок
+        if ("Server disconnected" in error_msg or 
+            "disconnected" in error_msg.lower() or
+            "Connection reset by peer" in error_msg):
+            error_text = (
+                "❌ **Ошибка при отправке: соединение разорвано**\n\n"
+                "Это произошло из-за большого размера файла или таймаута.\n\n"
+                "Попробуйте:\n"
+                "• Выбрать качество ниже\n"
+                "• Проверить статус Bot API Server\n"
+                "• Увеличить `MAX_FILE_SIZE` в `.env`"
+            )
+        elif "timeout" in error_msg.lower():
+            error_text = (
+                "❌ **Превышено время ожидания**\n\n"
+                "Загрузка заняла слишком много времени.\n\n"
+                "Попробуйте выбрать качество ниже."
+            )
+        else:
+            error_text = f"{original_text}\n\n❌ Ошибка при отправке: {error_msg}"
+
+        await callback.message.answer(error_text, parse_mode="Markdown" if "**" in error_text else None)
     finally:
         await cleanup_file(filepath)
 
