@@ -1747,21 +1747,9 @@ async def process_download_task(task: DownloadTask):
     duration_str = f"{int(duration) // 60}:{int(duration) % 60:02d}" if duration else "N/A"
     uploader = metadata.get('uploader', 'Неизвестно')
 
-    # Экранируем специальные символы Markdown только в заголовке для ссылки
-    # Ссылка формируется как [title](url) — нужно экранировать только внутри title
-    def escape_markdown_link_text(text):
-        """Экранирует специальные символы Markdown в тексте ссылки."""
-        # Telegram Markdown V1 требует экранирования только этих символов:
-        # _ * ` [ ] ( ) — но []() мы не трогаем, они нужны для ссылок
-        # Остальные символы не требуют экранирования в Markdown V1
-        escape_chars = '_*`'
-        result = str(text)
-        for char in escape_chars:
-            result = result.replace(char, '\\' + char)
-        return result
-    
-    safe_title = escape_markdown_link_text(title)
-    # Uploader не экранируем — в старом коде экранирования нет
+    # В старом коде (handle_download_queued) экранирования нет — title и uploader
+    # передаются напрямую. Telegram Markdown сам обрабатывает специальные символы.
+    # Оставляем как есть для консистентности со старым кодом.
 
     # Определяем chat_id
     # Для задач из поиска (callback_query=None) используем user_id как chat_id
@@ -1788,7 +1776,7 @@ async def process_download_task(task: DownloadTask):
             if task.callback_query is None:
                 # Задача из поиска — добавляем кликабельную ссылку
                 caption = (
-                    f"🎬 **[{safe_title}]({url})**\n\n"
+                    f"🎬 **[{title}]({url})**\n\n"
                     f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
@@ -1796,7 +1784,7 @@ async def process_download_task(task: DownloadTask):
             else:
                 # Обычная задача — без ссылки в названии
                 caption = (
-                    f"🎬 **{safe_title}**\n\n"
+                    f"🎬 **{title}**\n\n"
                     f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
@@ -1828,7 +1816,7 @@ async def process_download_task(task: DownloadTask):
             if task.callback_query is None:
                 # Задача из поиска — добавляем кликабельную ссылку
                 caption = (
-                    f"🎬 **[{safe_title}]({url})**\n\n"
+                    f"🎬 **[{title}]({url})**\n\n"
                     f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
@@ -1836,7 +1824,7 @@ async def process_download_task(task: DownloadTask):
             else:
                 # Обычная задача — без ссылки в названии
                 caption = (
-                    f"🎬 **{safe_title}**\n\n"
+                    f"🎬 **{title}**\n\n"
                     f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
