@@ -34,3 +34,9 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # Таймауты
 DOWNLOAD_TIMEOUT = 600  # 10 минут на загрузку
 SEND_TIMEOUT = 300  # 5 минут на отправку
+
+# Настройки очереди загрузок
+QUEUE_YOUTUBE_RPS = float(os.getenv("QUEUE_YOUTUBE_RPS", "1.0"))  # Запросов к YouTube в секунду
+QUEUE_TELEGRAM_UPLOADS_PER_MIN = int(os.getenv("QUEUE_TELEGRAM_UPLOADS_PER_MIN", "15"))  # Загрузок в Telegram в минуту
+QUEUE_MAX_CONCURRENT = int(os.getenv("QUEUE_MAX_CONCURRENT", "2"))  # Макс. одновременных загрузок
+QUEUE_MAX_PER_USER = int(os.getenv("QUEUE_MAX_PER_USER", "50"))  # Макс. задач в очереди на пользователя

@@ -73,6 +73,41 @@ class VideoCache:
                 CREATE INDEX IF NOT EXISTS idx_requests_user
                 ON requests(user_id)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS queue_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    video_id TEXT NOT NULL,
+                    format_code TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    started_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    error_message TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_queue_stats_user
+                ON queue_stats(user_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_queue_stats_status
+                ON queue_stats(status)
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    setting_key TEXT NOT NULL,
+                    setting_value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, setting_key)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_settings_user
+                ON user_settings(user_id)
+            """)
             conn.commit()
     
     def get(self, video_id: str, format_code: str) -> Optional[dict]:
@@ -237,6 +272,41 @@ class VideoCache:
         except Exception as e:
             print(f"Error adding user: {e}")
             return False
+
+    def set_user_language(self, user_id: int, language: str) -> bool:
+        """Установить предпочтительный язык для пользователя."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # Сначала убедимся что пользователь есть
+                conn.execute("""
+                    INSERT INTO users (user_id, last_seen)
+                    VALUES (?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
+                """, (user_id,))
+                # Добавляем или обновляем язык в отдельной таблице
+                conn.execute("""
+                    INSERT OR REPLACE INTO user_settings (user_id, setting_key, setting_value)
+                    VALUES (?, 'language', ?)
+                """, (user_id, language))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error setting user language: {e}")
+            return False
+
+    def get_user_language(self, user_id: int) -> str:
+        """Получить предпочтительный язык пользователя."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT setting_value FROM user_settings 
+                    WHERE user_id = ? AND setting_key = 'language'
+                """, (user_id,))
+                row = cursor.fetchone()
+                return row[0] if row else "ru"  # По умолчанию русский
+        except Exception as e:
+            print(f"Error getting user language: {e}")
+            return "ru"
     
     def is_banned(self, user_id: int) -> bool:
         """Проверить, забанен ли пользователь."""
@@ -350,3 +420,93 @@ class VideoCache:
                 LIMIT ?
             """, (limit,))
             return [dict(row) for row in cursor.fetchall()]
+
+    # === Методы для работы с очередью ===
+
+    def log_queue_task(
+        self, user_id: int, video_id: str, format_code: str,
+        status: str = "pending"
+    ) -> bool:
+        """Записать задачу в очередь."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO queue_stats (user_id, video_id, format_code, status)
+                    VALUES (?, ?, ?, ?)
+                """, (user_id, video_id, format_code, status))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error logging queue task: {e}")
+            return False
+
+    def update_queue_task_status(
+        self, user_id: int, video_id: str, format_code: str,
+        status: str, error_message: str = None
+    ) -> bool:
+        """Обновить статус задачи в очереди."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                if status == "started":
+                    conn.execute("""
+                        UPDATE queue_stats
+                        SET status = ?, started_at = CURRENT_TIMESTAMP
+                        WHERE user_id = ? AND video_id = ? AND format_code = ?
+                    """, (status, user_id, video_id, format_code))
+                elif status in ("completed", "failed", "cancelled"):
+                    conn.execute("""
+                        UPDATE queue_stats
+                        SET status = ?, completed_at = CURRENT_TIMESTAMP, error_message = ?
+                        WHERE user_id = ? AND video_id = ? AND format_code = ?
+                    """, (status, error_message, user_id, video_id, format_code))
+                else:
+                    conn.execute("""
+                        UPDATE queue_stats
+                        SET status = ?
+                        WHERE user_id = ? AND video_id = ? AND format_code = ?
+                    """, (status, user_id, video_id, format_code))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error updating queue task: {e}")
+            return False
+
+    def get_user_queue(self, user_id: int, limit: int = 20) -> List[dict]:
+        """Получить очередь пользователя."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT video_id, format_code, status, created_at, started_at, completed_at, error_message
+                FROM queue_stats
+                WHERE user_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (user_id, limit))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_queue_stats(self) -> dict:
+        """Получить статистику очереди."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM queue_stats WHERE status = 'pending'")
+            pending = cursor.fetchone()[0]
+
+            cursor = conn.execute("SELECT COUNT(*) FROM queue_stats WHERE status = 'downloading'")
+            downloading = cursor.fetchone()[0]
+
+            cursor = conn.execute("SELECT COUNT(*) FROM queue_stats WHERE status = 'uploading'")
+            uploading = cursor.fetchone()[0]
+
+            cursor = conn.execute("SELECT COUNT(*) FROM queue_stats WHERE status = 'completed'")
+            completed = cursor.fetchone()[0]
+
+            cursor = conn.execute("SELECT COUNT(*) FROM queue_stats WHERE status = 'failed'")
+            failed = cursor.fetchone()[0]
+
+            return {
+                "pending": pending,
+                "downloading": downloading,
+                "uploading": uploading,
+                "completed": completed,
+                "failed": failed,
+                "total": pending + downloading + uploading + completed + failed
+            }

@@ -4,8 +4,9 @@ YouTube Downloader Bot — Telegram-бот для загрузки видео и
 import asyncio
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
@@ -14,6 +15,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from yt_dlp import YoutubeDL
 
 from database import VideoCache
+
+from queue_manager import (
+    init_queue_manager,
+    get_queue_manager,
+    FairQueueManager,
+    DownloadTask,
+    TaskStatus
+)
 
 from config import (
     ADMIN_ID,
@@ -25,6 +34,10 @@ from config import (
     LOG_LEVEL,
     MAX_FILE_SIZE,
     SEND_TIMEOUT,
+    QUEUE_YOUTUBE_RPS,
+    QUEUE_TELEGRAM_UPLOADS_PER_MIN,
+    QUEUE_MAX_CONCURRENT,
+    QUEUE_MAX_PER_USER,
 )
 
 # Настройка логирования
@@ -60,6 +73,19 @@ dp = Dispatcher()
 cache = VideoCache(CACHE_DB_PATH)
 logger.info(f"Кэш видео инициализирован: {CACHE_DB_PATH}")
 
+# Инициализация менеджера очереди
+queue_mgr = init_queue_manager(
+    youtube_rps=QUEUE_YOUTUBE_RPS,
+    telegram_uploads_per_min=QUEUE_TELEGRAM_UPLOADS_PER_MIN,
+    max_concurrent_downloads=QUEUE_MAX_CONCURRENT,
+    max_queue_per_user=QUEUE_MAX_PER_USER
+)
+logger.info(
+    f"Очередь загрузок инициализирована: "
+    f"YouTube RPS={QUEUE_YOUTUBE_RPS}, Telegram uploads/min={QUEUE_TELEGRAM_UPLOADS_PER_MIN}, "
+    f"max_concurrent={QUEUE_MAX_CONCURRENT}, max_per_user={QUEUE_MAX_PER_USER}"
+)
+
 # Кэш для хранения URL по video_id (для callback, временно)
 url_cache: dict[str, str] = {}
 
@@ -88,6 +114,22 @@ YDL_OPTIONS = {
     "merge_output_format": "mp4",
 }
 
+# Опции для yt-dlp (для поиска)
+YDL_SEARCH_OPTIONS = {
+    "quiet": True,
+    "no_warnings": True,
+    "extract_flat": True,  # Не извлекать полную информацию, только метаданные
+    "default_search": "ytsearch10",  # Искать 10 видео по умолчанию
+}
+
+# Опции для yt-dlp (для поиска shorts)
+YDL_SHORTS_SEARCH_OPTIONS = {
+    "quiet": True,
+    "no_warnings": True,
+    "extract_flat": True,
+    "default_search": "ytsearch10",
+}
+
 
 def is_youtube_url(url: str) -> bool:
     """Проверяет, является ли ссылка YouTube URL."""
@@ -97,7 +139,7 @@ def is_youtube_url(url: str) -> bool:
 def get_video_info(url: str) -> Optional[dict]:
     """
     Получает информацию о видео без загрузки.
-    
+
     Returns:
         dict с информацией о видео или None при ошибке
     """
@@ -107,6 +149,128 @@ def get_video_info(url: str) -> Optional[dict]:
     except Exception as e:
         logger.error(f"Ошибка при получении информации: {e}")
         return None
+
+
+async def search_youtube_videos(query: str, limit: int = 10, language: str = "ru") -> List[dict]:
+    """
+    Ищет видео на YouTube по поисковому запросу.
+
+    Args:
+        query: Поисковый запрос
+        limit: Количество результатов (максимум 10)
+        language: Код языка (ru, en, etc.)
+
+    Returns:
+        Список словарей с информацией о видео (id, title, uploader, duration, url)
+    """
+    try:
+        options = YDL_SEARCH_OPTIONS.copy()
+        # Добавляем фильтр по языку через YouTube search parameters
+        search_query = f"{query}"
+        if language == "ru":
+            # Для русского языка добавляем фильтр
+            search_query = f"{query} русский язык"
+        
+        options["default_search"] = f"ytsearch{limit}"
+
+        loop = asyncio.get_event_loop()
+
+        def _search():
+            with YoutubeDL(options) as ydl:
+                result = ydl.extract_info(f"ytsearch{limit}:{search_query}", download=False)
+                return result.get('entries', [])
+
+        entries = await loop.run_in_executor(None, _search)
+
+        videos = []
+        for entry in entries:
+            if entry and entry.get('id'):
+                videos.append({
+                    'id': entry.get('id'),
+                    'title': entry.get('title', 'Без названия'),
+                    'uploader': entry.get('uploader', 'Неизвестно'),
+                    'duration': entry.get('duration', 0),
+                    'url': f"https://www.youtube.com/watch?v={entry.get('id')}",
+                    'type': 'video'
+                })
+
+        logger.info(f"Найдено {len(videos)} видео по запросу '{search_query}'")
+        return videos
+
+    except Exception as e:
+        logger.error(f"Ошибка при поиске видео: {e}")
+        return []
+
+
+async def search_youtube_shorts(query: str, limit: int = 10, language: str = "ru") -> List[dict]:
+    """
+    Ищет Shorts на YouTube по поисковому запросу.
+
+    Args:
+        query: Поисковый запрос
+        limit: Количество результатов (максимум 10)
+        language: Код языка (ru, en, etc.)
+
+    Returns:
+        Список словарей с информацией о shorts (id, title, uploader, duration, url)
+    """
+    try:
+        options = YDL_SEARCH_OPTIONS.copy()
+        # Добавляем фильтр по языку
+        search_query = f"{query} shorts"
+        if language == "ru":
+            search_query = f"{query} shorts русский"
+        
+        options["default_search"] = f"ytsearch{limit}"
+
+        loop = asyncio.get_event_loop()
+
+        def _search():
+            with YoutubeDL(options) as ydl:
+                result = ydl.extract_info(f"ytsearch{limit}:{search_query}", download=False)
+                return result.get('entries', [])
+
+        entries = await loop.run_in_executor(None, _search)
+
+        shorts = []
+        for entry in entries:
+            if entry and entry.get('id'):
+                # Фильтруем по длительности (shorts <= 60 секунд)
+                duration = entry.get('duration', 0)
+                if duration and duration <= 60:
+                    shorts.append({
+                        'id': entry.get('id'),
+                        'title': entry.get('title', 'Без названия'),
+                        'uploader': entry.get('uploader', 'Неизвестно'),
+                        'duration': duration,
+                        'url': f"https://www.youtube.com/watch?v={entry.get('id')}",
+                        'type': 'shorts'
+                    })
+
+        # Если не набрали 10 shorts, добавляем ещё из обычных результатов
+        if len(shorts) < limit:
+            for entry in entries:
+                if len(shorts) >= limit:
+                    break
+                if entry and entry.get('id') and entry not in shorts:
+                    duration = entry.get('duration', 0)
+                    # Добавляем короткие видео как shorts
+                    if duration and duration <= 180:  # До 3 минут
+                        shorts.append({
+                            'id': entry.get('id'),
+                            'title': entry.get('title', 'Без названия'),
+                            'uploader': entry.get('uploader', 'Неизвестно'),
+                            'duration': duration,
+                            'url': f"https://www.youtube.com/watch?v={entry.get('id')}",
+                            'type': 'shorts'
+                        })
+
+        logger.info(f"Найдено {len(shorts)} shorts по запросу '{search_query}'")
+        return shorts
+
+    except Exception as e:
+        logger.error(f"Ошибка при поиске shorts: {e}")
+        return []
 
 
 def build_quality_keyboard(video_id: str, formats: list, cached_formats: list = None) -> InlineKeyboardMarkup:
@@ -308,14 +472,13 @@ async def cmd_start(message: types.Message):
         message.from_user.username,
         message.from_user.full_name
     )
-    
+
     await message.answer(
         "👋 Привет! Я бот для загрузки видео из YouTube.\n\n"
         "📥 Просто отправь мне ссылку на видео, и я скачаю его для тебя.\n\n"
         "⚙️ Доступные команды:\n"
         "/help — справка\n"
-        "/status — статус бота\n"
-        "/ping — проверка связи",
+        "/status — статус бота",
         parse_mode="Markdown"
     )
     logger.info(f"Команда /start от {message.from_user.id}")
@@ -324,32 +487,46 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     """Обработчик команды /help."""
-    await message.answer(
-        "📖 **Инструкция по использованию:**\n\n"
-        "1️⃣ Отправь ссылку на YouTube видео\n"
-        "2️⃣ Выбери нужное качество из списка\n"
-        "3️⃣ Бот скачает и отправит видео\n\n"
-        "📹 **Доступные качества:**\n"
-        "- 144p, 240p, 360p\n"
-        "- 480p, 720p (HD)\n"
-        "- 1080p (FHD), 1440p (2K), 2160p (4K)\n"
-        "- 🎵 Только аудио (MP3)\n\n"
-        "⚡ **Кэширование:**\n"
-        "Повторные запросы отправляются мгновенно из кэша!\n"
-        "Закэшированные форматы отмечены ✅\n\n"
-        "👑 **Команды:**\n"
-        "/start — Приветствие\n"
-        "/help — Эта справка\n"
-        "/ping — Проверка связи\n"
-        "/status — Статистика кэша\n"
-        "/admin — Админ-панель (только админ)\n"
-        "/clear — Очистка кэша (только админ)\n"
-        "/stats — Подробная статистика (только админ)\n"
-        "/users — Список пользователей (только админ)\n"
-        "/ban, /unban — Бан/разбан (только админ)\n"
-        "/broadcast — Рассылка (только админ)",
-        parse_mode="Markdown"
-    )
+    is_admin = message.from_user.id == ADMIN_ID
+
+    if is_admin:
+        # Для админа: только команды и лимиты
+        await message.answer(
+            "👑 **Команды администратора:**\n\n"
+            "/clear — Очистка кэша\n"
+            "/stats — Подробная статистика\n"
+            "/users — Список пользователей\n"
+            "/ban, /unban — Бан/разбан пользователей\n"
+            "/broadcast — Рассылка всем пользователям\n\n"
+            "⚙️ **Лимиты:**\n"
+            f"• YouTube: ~{QUEUE_YOUTUBE_RPS} запрос/сек\n"
+            f"• Telegram: ~{QUEUE_TELEGRAM_UPLOADS_PER_MIN} загрузок/мин\n"
+            f"• Макс. одновременных загрузок: {QUEUE_MAX_CONCURRENT}\n"
+            f"• Макс. в очереди на пользователя: {QUEUE_MAX_PER_USER}",
+            parse_mode="Markdown"
+        )
+    else:
+        # Для обычных пользователей: только пошаговая инструкция
+        await message.answer(
+            "📖 **Инструкция по использованию:**\n\n"
+            "1️⃣ Отправь ссылку на YouTube видео\n"
+            "2️⃣ Выбери нужное качество из списка\n"
+            "3️⃣ Бот скачает и отправит видео\n\n"
+            "🔍 **Поиск видео:**\n"
+            "Просто отправь текстовый запрос (например: Steam Deck OLED)\n"
+            "Бот найдёт 10 видео + 10 shorts и отправит их!\n\n"
+            "🌐 **Язык поиска:**\n"
+            "/lang — Выбрать язык поиска (русский/English)\n\n"
+            "📹 **Доступные качества:**\n"
+            "- 144p, 240p, 360p\n"
+            "- 480p, 720p (HD)\n"
+            "- 1080p (FHD), 1440p (2K), 2160p (4K)\n"
+            "- 🎵 Только аудио (MP3)\n\n"
+            "⚡ **Кэширование:**\n"
+            "Повторные запросы отправляются мгновенно из кэша!\n"
+            "Закэшированные форматы отмечены ✅",
+            parse_mode="Markdown"
+        )
     logger.info(f"Команда /help от {message.from_user.id}")
 
 
@@ -358,6 +535,53 @@ async def cmd_ping(message: types.Message):
     """Обработчик команды /ping — проверка работоспособности."""
     await message.answer("🏓 Понг! Бот на связи!")
     logger.info(f"Команда /ping от {message.from_user.id}")
+
+
+@dp.message(Command("lang"))
+async def cmd_lang(message: types.Message):
+    """Обработчик команды /lang — выбор языка поиска."""
+    # Получаем текущий язык
+    current_lang = cache.get_user_language(message.from_user.id)
+    current_lang_name = "🇷🇺 Русский" if current_lang == "ru" else "🇬🇧 English"
+    
+    # Создаём клавиатуру с выбором языка
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🇷🇺 Русский", callback_data="lang_ru")
+    builder.button(text="🇬🇧 English", callback_data="lang_en")
+    builder.adjust(2)
+    
+    await message.answer(
+        f"🌐 **Выбор языка поиска**\n\n"
+        f"Текущий язык: {current_lang_name}\n\n"
+        f"Выберите предпочтительный язык для поиска видео:",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+    logger.info(f"Команда /lang от {message.from_user.id}")
+
+
+@dp.callback_query(F.data.startswith("lang_"))
+async def handle_lang_change(callback: types.CallbackQuery):
+    """Обработчик выбора языка."""
+    # Получаем код языка из callback
+    language = callback.data.split("_")[1]
+    
+    # Сохраняем в базу
+    cache.set_user_language(callback.from_user.id, language)
+    
+    # Определяем название языка
+    lang_name = "🇷🇺 Русский" if language == "ru" else "🇬🇧 English"
+    
+    await callback.message.edit_text(
+        f"✅ **Язык изменён**\n\n"
+        f"Теперь поиск будет выполняться на языке: {lang_name}\n\n"
+        f"Теперь отправьте любой текстовый запрос для поиска видео!",
+        parse_mode="Markdown"
+    )
+    await callback.answer(f"Язык: {lang_name}")
+    logger.info(f"Язык изменён пользователем {callback.from_user.id}: {language}")
 
 
 @dp.message(Command("admin"))
@@ -398,8 +622,7 @@ async def cmd_cache_status(message: types.Message):
             f"📊 **Статистика кэша:**\n\n"
             f"🎬 Видео: {stats['total_videos']}\n"
             f"📹 Форматов: {stats['total_files']}\n"
-            f"💾 Общий размер: {size_str}\n\n"
-            f"\\_file\\_id хранятся в Telegram, локальные файлы не хранятся\\.",
+            f"💾 Общий размер: {size_str}",
             parse_mode="Markdown"
         )
         logger.info(f"Команда /status от {message.from_user.id}")
@@ -606,6 +829,431 @@ async def cmd_users(message: types.Message):
 
     await message.answer(text, parse_mode="Markdown")
     logger.info(f"Команда /users от {message.from_user.id}")
+
+
+@dp.message(Command("queue"))
+async def cmd_queue(message: types.Message):
+    """Обработчик команды /queue — статус очереди пользователя."""
+    # Получаем статус очереди пользователя
+    user_status = await queue_mgr.get_user_queue_status(message.from_user.id)
+    
+    # Получаем общую статистику очереди
+    queue_stats = queue_mgr.get_stats()
+    
+    if user_status["queue_size"] == 0:
+        # Очередь пуста
+        await message.answer(
+            f"📊 **Ваша очередь:**\n\n"
+            f"✅ У вас нет активных загрузок.\n\n"
+            f"📈 **Общая статистика:**\n"
+            f"• В очереди: {queue_stats['queued']}\n"
+            f"• Активных загрузок: {queue_stats['active']}\n"
+            f"• Обработано: {queue_stats['total_processed']}\n"
+            f"• Ошибок: {queue_stats['total_failed']}",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Формируем список задач
+    text = f"📊 **Ваша очередь ({user_status['queue_size']}/{user_status['limit']}):**\n\n"
+    
+    for i, task_info in enumerate(user_status["tasks"][:10], 1):
+        status_emoji = {
+            "pending": "⏳",
+            "queued": "📋",
+            "downloading": "📥",
+            "uploading": "📤",
+            "completed": "✅",
+            "failed": "❌",
+            "cancelled": "⛔"
+        }.get(task_info["status"], "❓")
+        
+        text += f"{i}. {status_emoji} **{task_info['quality']}** ({task_info['video_id'][:11]}...)\n"
+        text += f"   Статус: {task_info['status']}\n\n"
+    
+    if len(user_status["tasks"]) > 10:
+        text += f"... и ещё {len(user_status['tasks']) - 10} задач\n\n"
+    
+    text += (
+        f"📈 **Общая статистика:**\n"
+        f"• В очереди: {queue_stats['queued']}\n"
+        f"• Активных загрузок: {queue_stats['active']}\n"
+        f"• Обработано: {queue_stats['total_processed']}\n"
+        f"• Ошибок: {queue_stats['total_failed']}"
+    )
+    
+    await message.answer(text, parse_mode="Markdown")
+    logger.info(f"Команда /queue от {message.from_user.id}")
+
+
+@dp.message(Command("qstat"))
+async def cmd_queue_stats(message: types.Message):
+    """Обработчик команды /qstat — подробная статистика очереди (админ)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    
+    stats = queue_mgr.get_stats()
+    db_stats = cache.get_queue_stats()
+    
+    text = (
+        f"📊 **Статистика очереди загрузок:**\n\n"
+        f"🔄 **Текущее состояние:**\n"
+        f"• В очереди: {stats['queued']}\n"
+        f"• Активных загрузок: {stats['active']}/{stats['max_concurrent']}\n\n"
+        f"📈 **Обработано:**\n"
+        f"• Успешно: {stats['total_processed']}\n"
+        f"• Ошибок: {stats['total_failed']}\n"
+        f"• Отменено: {stats['total_cancelled']}\n\n"
+        f"⚙️ **Настройки:**\n"
+        f"• YouTube RPS: {stats['youtube_rps']}\n"
+        f"• Telegram uploads/min: {stats['telegram_uploads_per_min']}\n\n"
+        f"🗄 **База данных:**\n"
+        f"• Ожидает: {db_stats['pending']}\n"
+        f"• Скачивается: {db_stats['downloading']}\n"
+        f"• Загружается: {db_stats['uploading']}\n"
+        f"• Завершено: {db_stats['completed']}\n"
+        f"• Провалено: {db_stats['failed']}"
+    )
+    
+    await message.answer(text, parse_mode="Markdown")
+    logger.info(f"Команда /qstat от {message.from_user.id}")
+
+
+# Глобальный словарь для хранения результатов поиска
+search_results_cache: Dict[int, Dict[str, any]] = {}
+
+
+@dp.message(F.text)
+async def handle_text_message(message: types.Message):
+    """
+    Обработчик текстовых сообщений (поиск видео по ключевым словам).
+    
+    Если пользователь присылает НЕ ссылку, а текст — используем этот текст
+    как ключевые слова для поиска видео на YouTube.
+    """
+    text = message.text.strip()
+    
+    # Игнорируем команды (начинаются с /)
+    if text.startswith('/'):
+        return
+    
+    # Проверяем, не забанен ли пользователь
+    if cache.is_banned(message.from_user.id):
+        await message.answer("🚫 Вы заблокированы администратором!")
+        logger.warning(f"Забаненный пользователь попытался выполнить поиск: {message.from_user.id}")
+        return
+    
+    # Если это YouTube URL — обрабатываем как ссылку
+    if is_youtube_url(text):
+        await handle_url(message)
+        return
+    
+    # Это поисковый запрос!
+    query = text
+    
+    # Добавляем/обновляем пользователя
+    cache.add_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.full_name
+    )
+    
+    logger.info(f"Поисковый запрос от {message.from_user.id}: '{query}'")
+    
+    # Отправляем статус
+    status_msg = await message.answer(
+        f"🔍 Ищу видео по запросу: **{query}**\n\n"
+        f"⏳ Пожалуйста, подождите...",
+        parse_mode="Markdown"
+    )
+
+    try:
+        # Получаем предпочтительный язык пользователя
+        user_language = cache.get_user_language(message.from_user.id)
+        
+        # Ищем видео и shorts параллельно с учётом языка
+        videos, shorts = await asyncio.gather(
+            search_youtube_videos(query, limit=10, language=user_language),
+            search_youtube_shorts(query, limit=10, language=user_language)
+        )
+        
+        if not videos and not shorts:
+            await status_msg.edit_text(
+                f"❌ Ничего не найдено по запросу: **{query}**\n\n"
+                f"Попробуйте другой запрос.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Сохраняем результаты в кэш для последующего использования
+        search_results_cache[message.from_user.id] = {
+            'query': query,
+            'videos': videos,
+            'shorts': shorts,
+            'timestamp': datetime.now()
+        }
+        
+        # Формируем отчёт
+        report_text = (
+            f"✅ **Поиск завершён!**\n\n"
+            f"🔍 Запрос: **{query}**\n\n"
+            f"📹 Найдено видео: **{len(videos)}**\n"
+            f"🎬 Найдено shorts: **{len(shorts)}**\n\n"
+        )
+        
+        # Добавляем информацию о видео
+        if videos:
+            report_text += "\n📋 **Видео:**\n"
+            for i, video in enumerate(videos[:10], 1):
+                duration = int(video.get('duration', 0) or 0)
+                duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+                title = video.get('title', 'Без названия')[:50]
+                if len(video.get('title', '')) > 50:
+                    title += "..."
+                report_text += f"{i}. 📹 [{title}]({video['url']}) ({duration_str})\n"
+
+        # Добавляем информацию о shorts
+        if shorts:
+            report_text += "\n🎬 **Shorts:**\n"
+            for i, short in enumerate(shorts[:10], 1):
+                duration = int(short.get('duration', 0) or 0)
+                duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+                title = short.get('title', 'Без названия')[:50]
+                if len(short.get('title', '')) > 50:
+                    title += "..."
+                report_text += f"{i}. 🎬 [{title}]({short['url']}) ({duration_str})\n"
+        
+        report_text += "\n\n⏳ **Начинаю загрузку и отправку...**"
+        
+        await status_msg.edit_text(
+            report_text,
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+        
+        # Отправляем отчёт через server-bot
+        await send_search_report(
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            query=query,
+            videos_count=len(videos),
+            shorts_count=len(shorts),
+            videos=videos,
+            shorts=shorts
+        )
+        
+        # Начинаем загрузку и отправку видео через очередь
+        await process_search_results(
+            user_id=message.from_user.id,
+            chat_id=message.chat.id,
+            videos=videos,
+            shorts=shorts,
+            query=query
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при поиске: {e}", exc_info=True)
+        await status_msg.edit_text(
+            f"❌ Произошла ошибка при поиске: {str(e)}\n\n"
+            f"Попробуйте позже.",
+            parse_mode="Markdown"
+        )
+
+
+async def send_search_report(
+    user_id: int,
+    username: str,
+    query: str,
+    videos_count: int,
+    shorts_count: int,
+    videos: List[dict],
+    shorts: List[dict]
+):
+    """
+    Отправляет подробный отчёт о результатах поиска через server-bot.
+    """
+    import subprocess
+    
+    # Формируем текст отчёта
+    report = (
+        f"🔍 **YouTube Search Report**\n\n"
+        f"👤 User: @{username or user_id}\n"
+        f"🔑 Query: `{query}`\n\n"
+        f"📊 **Results:**\n"
+        f"• Videos found: {videos_count}\n"
+        f"• Shorts found: {shorts_count}\n\n"
+    )
+    
+    if videos:
+        report += "📹 **Top Videos:**\n"
+        for i, v in enumerate(videos[:10], 1):
+            title = v.get('title', 'N/A')[:60]
+            duration = int(v.get('duration', 0) or 0)
+            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+            report += f"{i}. {title} ({duration_str})\n"
+        report += "\n"
+
+    if shorts:
+        report += "🎬 **Top Shorts:**\n"
+        for i, s in enumerate(shorts[:10], 1):
+            title = s.get('title', 'N/A')[:60]
+            duration = int(s.get('duration', 0) or 0)
+            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+            report += f"{i}. {title} ({duration_str})\n"
+    
+    report += f"\n✅ Search completed successfully!"
+    
+    # Отправляем через server-bot
+    try:
+        script_path = "/root/git/server-bot/send_report.py"
+        # Экранируем кавычки для bash
+        escaped_report = report.replace('"', '\\"').replace('$', '\\$')
+        command = f'python3 {script_path} "{escaped_report}"'
+        
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            logger.info(f"Отчёт о поиске отправлен через server-bot для пользователя {user_id}")
+        else:
+            logger.error(f"Ошибка отправки отчёта: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.error("Таймаут при отправке отчёта через server-bot")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке отчёта: {e}")
+
+
+async def process_search_results(
+    user_id: int,
+    chat_id: int,
+    videos: List[dict],
+    shorts: List[dict],
+    query: str
+):
+    """
+    Обрабатывает результаты поиска: добавляет видео в честную очередь (Fair Queue).
+    
+    Использует ту же очередь, что и при скачивании по ссылке.
+    Все лимиты (YouTube RPS, Telegram uploads/min) применяются.
+    """
+    total_added = 0
+    total_failed = 0
+
+    # Объединяем видео и shorts в один список для обработки
+    all_items = []
+
+    # Сначала видео
+    for video in videos:
+        all_items.append({
+            'url': video['url'],
+            'id': video['id'],
+            'title': video['title'],
+            'type': 'video',
+            'duration': video.get('duration', 0)
+        })
+
+    # Затем shorts
+    for short in shorts:
+        all_items.append({
+            'url': short['url'],
+            'id': short['id'],
+            'title': short['title'],
+            'type': 'shorts',
+            'duration': short.get('duration', 0)
+        })
+
+    logger.info(f"Добавляю {len(all_items)} видео из поиска в очередь")
+
+    # Получаем информацию о каждом видео и добавляем в очередь
+    for idx, item in enumerate(all_items):
+        try:
+            logger.info(f"Обработка [{idx+1}/{len(all_items)}]: {item['type']} - {item['title'][:50]}")
+
+            # Получаем информацию о видео
+            info = get_video_info(item['url'])
+
+            if not info:
+                logger.warning(f"Не удалось получить информацию о видео: {item['url']}")
+                total_failed += 1
+                continue
+
+            # Извлекаем доступные форматы (ограничиваем 720p для поиска)
+            formats = info.get('formats', [])
+            available = get_available_formats(
+                formats,
+                max_size_mb=MAX_FILE_SIZE // 1024 // 1024,
+                max_height=720  # Для поиска ограничиваем 720p
+            )
+
+            if not available:
+                logger.warning(f"Нет доступных форматов для видео: {item['url']}")
+                total_failed += 1
+                continue
+
+            # Выбираем первое доступное качество (лучшее)
+            format_code, description, height, est_size = available[0]
+            quality_desc = description.split(' (')[0] if ' (' in description else description
+
+            # Сохраняем URL и метаданные в кэш
+            url_cache[item['id']] = item['url']
+            cache.set_url_for_video(item['id'], item['url'])
+            video_metadata_cache[item['id']] = {
+                "title": item['title'],
+                "uploader": info.get('uploader', 'Неизвестно'),
+                "duration": item['duration']
+            }
+
+            # Создаём задачу для очереди
+            # callback_query=None означает что это задача из поиска
+            task = DownloadTask(
+                task_id=f"search_{item['id']}_{format_code}_{int(datetime.now().timestamp())}_{total_added}",
+                user_id=user_id,
+                username=f"search_{user_id}",
+                video_url=item['url'],
+                video_id=item['id'],
+                format_code=format_code,
+                quality_label=quality_desc,
+                callback_query=None  # Нет callback, это поиск
+            )
+            
+            # Добавляем в честную очередь
+            added = await queue_mgr.add_task(task)
+            
+            if added:
+                # Логируем в БД
+                cache.log_queue_task(user_id, item['id'], format_code, "pending")
+                total_added += 1
+                logger.info(f"Задача добавлена в очередь: {task.task_id}")
+            else:
+                logger.warning(f"Не удалось добавить задачу в очередь: {item['id']}")
+                total_failed += 1
+
+            # Небольшая задержка между добавлениями
+            await asyncio.sleep(0.3)
+
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении {item['type']} в очередь: {e}", exc_info=True)
+            total_failed += 1
+
+    logger.info(f"Поиск завершён: добавлено {total_added} видео в очередь, ошибок: {total_failed}")
+    
+    # Отправляем сообщение пользователю о том что видео добавлены в очередь
+    try:
+        await bot.send_message(
+            chat_id,
+            f"✅ **Добавлено в очередь:** {total_added} видео\n\n"
+            f"📹 Видео будут отправлены по мере загрузки.\n"
+            f"Используйте /queue для просмотра статуса очереди.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отправить сообщение о статусе очереди: {e}")
 
 
 @dp.message(F.text)
@@ -1036,12 +1684,322 @@ async def handle_cancel(callback: types.CallbackQuery):
     await callback.answer("Загрузка отменена")
 
 
+async def process_download_task(task: DownloadTask):
+    """
+    Обработчик задачи из очереди загрузок.
+
+    Эта функция вызывается queue_manager для каждой задачи.
+    Обрабатывает как обычные задачи (с callback_query), так и задачи из поиска (без callback_query).
+    """
+    # Обновляем статус в БД
+    cache.update_queue_task_status(
+        task.user_id, task.video_id, task.format_code, "started"
+    )
+
+    # Получаем URL из кэша
+    url = url_cache.get(task.video_id)
+    if not url:
+        url = cache.get_url_for_video(task.video_id)
+        if url:
+            url_cache[task.video_id] = url
+
+    if not url:
+        logger.error(f"Не найден URL для видео {task.video_id}")
+        if task.callback_query:
+            await task.callback_query.answer("⚠️ Ошибка загрузки", show_alert=True)
+        return
+
+    # Скачиваем видео
+    filepath, title = await download_video(url, task.format_code)
+
+    if not filepath:
+        logger.error(f"Не удалось скачать видео {task.video_id}")
+        if task.callback_query:
+            await task.callback_query.answer("⚠️ Ошибка загрузки", show_alert=True)
+        return
+
+    # Проверяем размер
+    file_size = filepath.stat().st_size
+    if file_size > MAX_FILE_SIZE:
+        logger.warning(f"Файл слишком большой: {file_size} байт")
+        await cleanup_file(filepath)
+        if task.callback_query:
+            await task.callback_query.answer("⚠️ Файл слишком большой", show_alert=True)
+        return
+
+    task.file_size = file_size
+    task.file_path = str(filepath)
+
+    # Получаем metadata — приоритет из кэша, потом из task
+    metadata = video_metadata_cache.get(task.video_id, {})
+    if not metadata:
+        # Пытаемся получить из кэша БД
+        cached = cache.get(task.video_id, task.format_code)
+        if cached:
+            metadata = {
+                'title': cached.get('title', ''),
+                'duration': cached.get('duration', 0),
+                'uploader': cached.get('uploader', '')
+            }
+
+    title = metadata.get('title', title or 'Видео')
+    duration = metadata.get('duration', 0)
+    duration_str = f"{int(duration) // 60}:{int(duration) % 60:02d}" if duration else "N/A"
+    uploader = metadata.get('uploader', 'Неизвестно')
+
+    # Экранируем специальные символы Markdown в заголовке
+    # https://core.telegram.org/bots/api#markdownv2-style
+    def escape_markdown(text):
+        """Экранирует специальные символы Markdown."""
+        escape_chars = r'_*[]()~`>#+-=|{}.!'
+        return ''.join('\\' + c if c in escape_chars else c for c in str(text))
+    
+    safe_title = escape_markdown(title)
+    safe_uploader = escape_markdown(uploader)
+
+    # Определяем chat_id
+    # Для задач из поиска (callback_query=None) используем user_id как chat_id
+    chat_id = task.user_id
+    if task.callback_query:
+        chat_id = task.callback_query.message.chat.id
+
+    # Отправляем видео
+    try:
+        if BOT_API_SERVER_URL:
+            import aiohttp
+            import aiofiles
+
+            async with aiofiles.open(filepath, 'rb') as f:
+                video_data = await f.read()
+
+            api_url = f"{BOT_API_SERVER_URL}/sendVideo"
+            data = aiohttp.FormData()
+            data.add_field('chat_id', str(chat_id))
+            data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
+
+            caption = (
+                f"🎬 **{safe_title}**\n\n"
+                f"👤 {safe_uploader}\n"
+                f"⏱ Длительность: {duration_str}\n"
+                f"📹 Качество: {task.quality_label}"
+            )
+            data.add_field('caption', caption)
+            data.add_field('parse_mode', 'Markdown')
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, data=data) as response:
+                    result = await response.json()
+                    if not result.get('ok'):
+                        raise Exception(f"Bot API error: {result.get('description', 'Unknown error')}")
+
+                    file_id = result.get('result', {}).get('video', {}).get('file_id')
+                    if file_id:
+                        cache.set(
+                            task.video_id, task.format_code, file_id, file_size, task.quality_label,
+                            title, duration, uploader
+                        )
+
+            # Для обычных задач удаляем сообщение с кнопками
+            if task.callback_query:
+                await task.callback_query.message.delete()
+        else:
+            video = FSInputFile(filepath)
+
+            caption = (
+                f"🎬 **{safe_title}**\n\n"
+                f"👤 {safe_uploader}\n"
+                f"⏱ Длительность: {duration_str}\n"
+                f"📹 Качество: {task.quality_label}"
+            )
+
+            msg = await bot.send_video(chat_id, video, caption=caption, parse_mode="Markdown")
+
+            cache.set(
+                task.video_id, task.format_code, msg.video.file_id, file_size, task.quality_label,
+                title, duration, uploader
+            )
+
+            # Для обычных задач удаляем сообщение с кнопками
+            if task.callback_query:
+                await task.callback_query.message.delete()
+
+    except Exception as e:
+        logger.error(f"Ошибка при отправке {task.video_id}: {e}")
+    finally:
+        await cleanup_file(filepath)
+
+    # Логируем успешный запрос
+    cache.log_request(task.user_id, task.video_id, task.format_code, file_size, from_cache=False)
+    cache.update_queue_task_status(
+        task.user_id, task.video_id, task.format_code, "completed"
+    )
+
+
+@dp.callback_query(F.data.startswith("download_"))
+async def handle_download_queued(callback: types.CallbackQuery):
+    """
+    Обработчик выбора качества с добавлением в очередь.
+    
+    Вместо немедленной загрузки, задача добавляется в очередь.
+    """
+    # Парсим callback: download_{video_id}_{format_code}
+    callback_data = callback.data
+
+    if not callback_data.startswith("download_"):
+        await callback.answer("❌ Ошибка формата", show_alert=True)
+        return
+
+    remainder = callback_data[9:]
+    last_underscore = remainder.rfind("_")
+    if last_underscore == -1:
+        await callback.answer("❌ Ошибка формата", show_alert=True)
+        return
+
+    video_id = remainder[:last_underscore]
+    format_code = remainder[last_underscore + 1:]
+
+    if not video_id or not format_code:
+        await callback.answer("❌ Ошибка формата", show_alert=True)
+        return
+
+    # Проверяем, не забанен ли пользователь
+    if cache.is_banned(callback.from_user.id):
+        await callback.answer("🚫 Вы заблокированы администратором!", show_alert=True)
+        return
+
+    # Проверяем размер из сообщения
+    size_match = re.search(r'\((\d+) MB\)', callback.message.text)
+    size_info = f" (~{size_match.group(1)} MB)" if size_match else ""
+
+    # Определяем описание качества
+    main_format_id = format_code.split('+')[0]
+    if format_code == "bestaudio":
+        quality_desc = "Только аудио"
+    elif main_format_id in ("160", "278"):
+        quality_desc = "144p"
+    elif main_format_id in ("133", "242"):
+        quality_desc = "240p"
+    elif main_format_id in ("134", "243"):
+        quality_desc = "360p"
+    elif main_format_id in ("135", "244"):
+        quality_desc = "480p"
+    elif main_format_id in ("136", "247"):
+        quality_desc = "720p (HD)"
+    elif main_format_id in ("137", "248"):
+        quality_desc = "1080p (FHD)"
+    elif main_format_id in ("264", "271", "308"):
+        quality_desc = "1440p (2K)"
+    elif main_format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
+        quality_desc = "2160p (4K)"
+    else:
+        quality_desc = f"{main_format_id}"
+
+    # Получаем URL
+    url = url_cache.get(video_id)
+    if not url:
+        url = cache.get_url_for_video(video_id)
+        if url:
+            url_cache[video_id] = url
+
+    if not url:
+        await callback.answer("❌ Ссылка устарела, отправьте заново", show_alert=True)
+        return
+
+    # Проверяем кэш — если уже есть, отправляем сразу
+    cached = cache.get(video_id, format_code)
+    if cached:
+        logger.info(f"Отправка из кэша: {video_id} / {format_code}")
+
+        duration = cached.get("duration", 0)
+        duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+        title = cached.get("title", "Видео")
+        uploader = cached.get("uploader", "Неизвестно")
+        source_url = url_cache.get(video_id, f"https://www.youtube.com/watch?v={video_id}")
+
+        caption = (
+            f"🎬 **[{title}]({source_url})**\n\n"
+            f"👤 {uploader}\n"
+            f"⏱ Длительность: {duration_str}\n"
+            f"📹 Качество: {quality_desc}"
+        )
+
+        try:
+            await callback.message.answer_video(
+                video=cached["file_id"],
+                caption=caption,
+                parse_mode="Markdown"
+            )
+            cache.log_request(
+                callback.from_user.id, video_id, format_code,
+                cached.get("file_size", 0), from_cache=True
+            )
+            await callback.message.delete()
+            await callback.answer("✅ Отправлено из кэша")
+        except Exception as e:
+            logger.error(f"Ошибка отправки из кэша: {e}")
+            await callback.answer("❌ Ошибка при отправке из кэша", show_alert=True)
+        return
+
+    # Создаём задачу для очереди
+    task = DownloadTask(
+        task_id=f"{video_id}_{format_code}_{int(datetime.now().timestamp())}",
+        user_id=callback.from_user.id,
+        username=callback.from_user.username or str(callback.from_user.id),
+        video_url=url,
+        video_id=video_id,
+        format_code=format_code,
+        quality_label=quality_desc,
+        callback_query=callback
+    )
+
+    # Добавляем в очередь
+    await queue_mgr.add_task(task)
+
+    # Логируем в БД
+    cache.log_queue_task(
+        callback.from_user.id, video_id, format_code, "pending"
+    )
+
+    # Получаем метаданные для отображения
+    metadata = video_metadata_cache.get(video_id, {})
+    title = metadata.get('title', 'Видео')
+    duration = metadata.get('duration', 0)
+    duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+    uploader = metadata.get('uploader', 'Неизвестно')
+
+    # Получаем оригинальное описание
+    original_text = callback.message.text
+    if "Выберите качество:" in original_text:
+        original_text = original_text.split("Выберите качество:")[0].strip()
+
+    # Обновляем сообщение — показываем что загрузка началась
+    await callback.message.edit_text(
+        f"{original_text}\n\n"
+        f"⏳ **Скачиваю {quality_desc}...**\n\n"
+        f"🎬 {title}\n"
+        f"👤 {uploader}\n"
+        f"⏱ {duration_str}",
+        parse_mode="Markdown"
+    )
+
+    await callback.answer(f"⏳ Загружаю {quality_desc}...")
+    logger.info(
+        f"Задача добавлена в очередь: {task.task_id} "
+        f"(user={callback.from_user.id}, video={video_id}, format={format_code})"
+    )
+
+
 async def main():
     """Основная функция запуска бота."""
     # Создаём директорию для загрузок
     DOWNLOAD_PATH.mkdir(parents=True, exist_ok=True)
 
     logger.info("Запуск бота...")
+    
+    # Запускаем менеджер очереди
+    await queue_mgr.start(process_download_task)
+    logger.info("Менеджер очереди запущен")
+    
     await dp.start_polling(bot)
 
 
