@@ -1747,15 +1747,19 @@ async def process_download_task(task: DownloadTask):
     duration_str = f"{int(duration) // 60}:{int(duration) % 60:02d}" if duration else "N/A"
     uploader = metadata.get('uploader', 'Неизвестно')
 
-    # Экранируем специальные символы Markdown в заголовке
-    # https://core.telegram.org/bots/api#markdownv2-style
-    def escape_markdown(text):
-        """Экранирует специальные символы Markdown."""
-        escape_chars = r'_*[]()~`>#+-=|{}.!'
-        return ''.join('\\' + c if c in escape_chars else c for c in str(text))
+    # Экранируем специальные символы Markdown только в заголовке для ссылки
+    # Ссылка формируется как [title](url) — нужно экранировать только внутри title
+    def escape_markdown_link_text(text):
+        """Экранирует специальные символы Markdown в тексте ссылки."""
+        # Экранируем только те символы, которые ломают парсинг, но не сам синтаксис ссылки
+        escape_chars = r'_*`~>#+-=|{}.!'
+        result = str(text)
+        for char in escape_chars:
+            result = result.replace(char, '\\' + char)
+        return result
     
-    safe_title = escape_markdown(title)
-    safe_uploader = escape_markdown(uploader)
+    safe_title = escape_markdown_link_text(title)
+    safe_uploader = escape_markdown_link_text(uploader)
 
     # Определяем chat_id
     # Для задач из поиска (callback_query=None) используем user_id как chat_id
