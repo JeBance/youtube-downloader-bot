@@ -1248,8 +1248,7 @@ async def process_search_results(
         await bot.send_message(
             chat_id,
             f"✅ **Добавлено в очередь:** {total_added} видео\n\n"
-            f"📹 Видео будут отправлены по мере загрузки.\n"
-            f"Используйте /queue для просмотра статуса очереди.",
+            f"📹 Видео будут отправлены по мере загрузки.",
             parse_mode="Markdown"
         )
     except Exception as e:
