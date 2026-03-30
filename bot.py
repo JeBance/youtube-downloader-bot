@@ -1011,7 +1011,9 @@ async def handle_text_message(message: types.Message):
                 title = video.get('title', 'Без названия')[:50]
                 if len(video.get('title', '')) > 50:
                     title += "..."
-                report_text += f"{i}. 📹 [{title}]({video['url']}) ({duration_str})\n"
+                # Экранируем специальные символы в заголовке для Markdown
+                escaped_title = title.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
+                report_text += f"{i}. 📹 [{escaped_title}]({video['url']}) ({duration_str})\n"
 
         # Добавляем информацию о shorts
         if shorts:
@@ -1022,7 +1024,9 @@ async def handle_text_message(message: types.Message):
                 title = short.get('title', 'Без названия')[:50]
                 if len(short.get('title', '')) > 50:
                     title += "..."
-                report_text += f"{i}. 🎬 [{title}]({short['url']}) ({duration_str})\n"
+                # Экранируем специальные символы в заголовке для Markdown
+                escaped_title = title.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
+                report_text += f"{i}. 🎬 [{escaped_title}]({short['url']}) ({duration_str})\n"
         
         report_text += "\n\n⏳ **Начинаю загрузку и отправку...**"
         
