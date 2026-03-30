@@ -1777,12 +1777,25 @@ async def process_download_task(task: DownloadTask):
             data.add_field('chat_id', str(chat_id))
             data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
 
-            caption = (
-                f"🎬 **{safe_title}**\n\n"
-                f"👤 {safe_uploader}\n"
-                f"⏱ Длительность: {duration_str}\n"
-                f"📹 Качество: {task.quality_label}"
-            )
+            # Формируем caption с кликабельной ссылкой на источник
+            # Для поиска добавляем ссылку, для обычных задач — как было
+            if task.callback_query is None:
+                # Задача из поиска — добавляем кликабельную ссылку
+                caption = (
+                    f"🎬 **[{safe_title}]({url})**\n\n"
+                    f"👤 {safe_uploader}\n"
+                    f"⏱ Длительность: {duration_str}\n"
+                    f"📹 Качество: {task.quality_label}"
+                )
+            else:
+                # Обычная задача — без ссылки в названии
+                caption = (
+                    f"🎬 **{safe_title}**\n\n"
+                    f"👤 {safe_uploader}\n"
+                    f"⏱ Длительность: {duration_str}\n"
+                    f"📹 Качество: {task.quality_label}"
+                )
+            
             data.add_field('caption', caption)
             data.add_field('parse_mode', 'Markdown')
 
@@ -1805,12 +1818,23 @@ async def process_download_task(task: DownloadTask):
         else:
             video = FSInputFile(filepath)
 
-            caption = (
-                f"🎬 **{safe_title}**\n\n"
-                f"👤 {safe_uploader}\n"
-                f"⏱ Длительность: {duration_str}\n"
-                f"📹 Качество: {task.quality_label}"
-            )
+            # Формируем caption с кликабельной ссылкой на источник
+            if task.callback_query is None:
+                # Задача из поиска — добавляем кликабельную ссылку
+                caption = (
+                    f"🎬 **[{safe_title}]({url})**\n\n"
+                    f"👤 {safe_uploader}\n"
+                    f"⏱ Длительность: {duration_str}\n"
+                    f"📹 Качество: {task.quality_label}"
+                )
+            else:
+                # Обычная задача — без ссылки в названии
+                caption = (
+                    f"🎬 **{safe_title}**\n\n"
+                    f"👤 {safe_uploader}\n"
+                    f"⏱ Длительность: {duration_str}\n"
+                    f"📹 Качество: {task.quality_label}"
+                )
 
             msg = await bot.send_video(chat_id, video, caption=caption, parse_mode="Markdown")
 
