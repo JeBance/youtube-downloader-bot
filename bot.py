@@ -1759,7 +1759,7 @@ async def process_download_task(task: DownloadTask):
         return result
     
     safe_title = escape_markdown_link_text(title)
-    safe_uploader = escape_markdown_link_text(uploader)
+    # Uploader не экранируем — в старом коде экранирования нет
 
     # Определяем chat_id
     # Для задач из поиска (callback_query=None) используем user_id как chat_id
@@ -1787,7 +1787,7 @@ async def process_download_task(task: DownloadTask):
                 # Задача из поиска — добавляем кликабельную ссылку
                 caption = (
                     f"🎬 **[{safe_title}]({url})**\n\n"
-                    f"👤 {safe_uploader}\n"
+                    f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
                 )
@@ -1795,7 +1795,7 @@ async def process_download_task(task: DownloadTask):
                 # Обычная задача — без ссылки в названии
                 caption = (
                     f"🎬 **{safe_title}**\n\n"
-                    f"👤 {safe_uploader}\n"
+                    f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
                 )
@@ -1827,7 +1827,7 @@ async def process_download_task(task: DownloadTask):
                 # Задача из поиска — добавляем кликабельную ссылку
                 caption = (
                     f"🎬 **[{safe_title}]({url})**\n\n"
-                    f"👤 {safe_uploader}\n"
+                    f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
                 )
@@ -1835,7 +1835,7 @@ async def process_download_task(task: DownloadTask):
                 # Обычная задача — без ссылки в названии
                 caption = (
                     f"🎬 **{safe_title}**\n\n"
-                    f"👤 {safe_uploader}\n"
+                    f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
                 )
