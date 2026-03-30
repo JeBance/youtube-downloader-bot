@@ -1751,8 +1751,10 @@ async def process_download_task(task: DownloadTask):
     # Ссылка формируется как [title](url) — нужно экранировать только внутри title
     def escape_markdown_link_text(text):
         """Экранирует специальные символы Markdown в тексте ссылки."""
-        # Экранируем только те символы, которые ломают парсинг, но не сам синтаксис ссылки
-        escape_chars = r'_*`~>#+-=|{}.!'
+        # Telegram Markdown V1 требует экранирования только этих символов:
+        # _ * ` [ ] ( ) — но []() мы не трогаем, они нужны для ссылок
+        # Остальные символы не требуют экранирования в Markdown V1
+        escape_chars = '_*`'
         result = str(text)
         for char in escape_chars:
             result = result.replace(char, '\\' + char)
