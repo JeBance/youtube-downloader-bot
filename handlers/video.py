@@ -37,25 +37,56 @@ def build_quality_keyboard(
     Args:
         video_db_id: ID видео в БД (не YouTube ID!)
         formats: список кортежей (format_code, description, height, estimated_size)
-        cached_formats: список dict из БД с telegram_file_id
+        cached_formats: список dict из БД с telegram_file_id и quality_label
     """
     builder = InlineKeyboardBuilder()
 
-    # cached_formats это список dict, берём format_code из каждого
-    cached_set = set(fmt.get('format_code', '') for fmt in (cached_formats or []) if fmt.get('telegram_file_id'))
+    # cached_formats это список dict из БД, берём quality_label оттуда
+    cached_dict = {fmt.get('format_code'): fmt.get('quality_label') for fmt in (cached_formats or [])}
 
     for fmt_code, description, height, est_size in formats:
         if est_size > MAX_FILE_SIZE:
             continue
 
-        if fmt_code in cached_set:
+        # Берём quality_label из БД (если есть) или определяем по format_id
+        quality_label = cached_dict.get(fmt_code)
+        if not quality_label:
+            main_format_id = fmt_code.split('+')[0]
+            if fmt_code == "bestaudio":
+                quality_label = "Только аудио"
+            elif main_format_id in ("160", "278"):
+                quality_label = "144p"
+            elif main_format_id in ("133", "242", "299"):
+                quality_label = "240p"
+            elif main_format_id in ("134", "243", "300"):
+                quality_label = "360p"
+            elif main_format_id in ("135", "244", "298", "301"):
+                quality_label = "480p"
+            elif main_format_id in ("136", "247", "302"):
+                quality_label = "720p (HD)"
+            elif main_format_id in ("137", "248", "303"):
+                quality_label = "1080p (FHD)"
+            elif main_format_id in ("264", "271", "308"):
+                quality_label = "1440p (2K)"
+            elif main_format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
+                quality_label = "2160p (4K)"
+            else:
+                quality_label = f"{main_format_id}"
+
+        # Извлекаем размер из description
+        size_match = re.search(r'\((\d+) MB\)', description)
+        size_str = f" ({size_match.group(1)} MB)" if size_match else ""
+
+        button_text = f"{quality_label}{size_str}"
+
+        if fmt_code in cached_dict:
             builder.button(
-                text=f"✅ {description}",
+                text=f"✅ {button_text}",
                 callback_data=f"download_{video_db_id}_{fmt_code}"
             )
         else:
             builder.button(
-                text=f"📹 {description}",
+                text=f"📹 {button_text}",
                 callback_data=f"download_{video_db_id}_{fmt_code}"
             )
 
@@ -234,9 +265,31 @@ async def handle_url(message: Message, db: VideoDatabase):
         duration=duration
     )
 
-    # 2. Сохраняем форматы в БД если их там нет
+    # 2. Сохраняем форматы в БД с правильным quality_label
     for fmt_code, description, height, est_size in available:
-        quality_label = description.split(' (')[0] if ' (' in description else description
+        # Определяем quality_label по format_id (а не из description!)
+        main_format_id = fmt_code.split('+')[0]
+        if fmt_code == "bestaudio":
+            quality_label = "Только аудио"
+        elif main_format_id in ("160", "278"):
+            quality_label = "144p"
+        elif main_format_id in ("133", "242", "299"):
+            quality_label = "240p"
+        elif main_format_id in ("134", "243", "300"):
+            quality_label = "360p"
+        elif main_format_id in ("135", "244", "298", "301"):
+            quality_label = "480p"
+        elif main_format_id in ("136", "247", "302"):
+            quality_label = "720p (HD)"
+        elif main_format_id in ("137", "248", "303"):
+            quality_label = "1080p (FHD)"
+        elif main_format_id in ("264", "271", "308"):
+            quality_label = "1440p (2K)"
+        elif main_format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
+            quality_label = "2160p (4K)"
+        else:
+            quality_label = f"{main_format_id}"
+        
         db.create_or_get_format(
             video_id=video_db_id,
             format_code=fmt_code,
