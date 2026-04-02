@@ -178,11 +178,18 @@ async def process_search_results(
                 requested_by_user_id=user_id
             )
 
-            # 5. Проверяем, есть ли уже в кэше
-            cached_format = db.get_format(video_db_id, format_code)
-            if cached_format and cached_format.get('telegram_file_id'):
+            # 5. Проверяем, есть ли уже в кэше ПО КАЧЕСТВУ
+            # (YouTube может выдавать разные format_id для одного качества)
+            all_formats = db.get_all_formats_for_video(video_db_id)
+            cached_format = None
+            for fmt in all_formats:
+                if fmt.get('quality_label') == quality_desc and fmt.get('telegram_file_id'):
+                    cached_format = fmt
+                    break
+            
+            if cached_format:
                 # Уже есть в кэше — отправляем сразу
-                logger.info(f"Отправка из кэша: {video_db_id} / {format_code}")
+                logger.info(f"Отправка из кэша: {video_db_id} / {quality_desc}")
 
                 # Получаем длительность из БД videos
                 video_info = db.get_video_by_internal_id(video_db_id)
