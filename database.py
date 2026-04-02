@@ -868,6 +868,25 @@ class VideoDatabase:
             return True
 
     def clear(self) -> int:
-        """Очистить кэш."""
-        return self.clear_completed_formats()
+        """Очистить кэш (видео + форматы)."""
+        with sqlite3.connect(self.db_path) as conn:
+            # Считаем видео
+            cursor = conn.execute("SELECT COUNT(*) FROM videos")
+            videos_count = cursor.fetchone()[0]
+            
+            # Считаем форматы
+            cursor = conn.execute("SELECT COUNT(*) FROM video_formats")
+            formats_count = cursor.fetchone()[0]
+            
+            # Очищаем video_formats
+            conn.execute("DELETE FROM video_formats")
+            
+            # Очищаем videos (кроме записей без youtube_video_id)
+            conn.execute("DELETE FROM videos")
+            
+            # Очищаем download_requests
+            conn.execute("DELETE FROM download_requests")
+            
+            conn.commit()
+            return videos_count + formats_count
 

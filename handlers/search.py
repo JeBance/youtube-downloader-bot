@@ -168,7 +168,29 @@ async def process_search_results(
                 continue
 
             format_code, description, height, est_size = available[0]
-            quality_desc = description.split(' (')[0] if ' (' in description else description
+            
+            # Определяем quality_desc по format_id (как в handlers/video.py)
+            main_format_id = format_code.split('+')[0]
+            if format_code == "bestaudio":
+                quality_desc = "Только аудио"
+            elif main_format_id in ("160", "278"):
+                quality_desc = "144p"
+            elif main_format_id in ("133", "242", "299"):
+                quality_desc = "240p"
+            elif main_format_id in ("134", "243", "300"):
+                quality_desc = "360p"
+            elif main_format_id in ("135", "244", "298", "301"):
+                quality_desc = "480p"
+            elif main_format_id in ("136", "247", "302"):
+                quality_desc = "720p (HD)"
+            elif main_format_id in ("137", "248", "303"):
+                quality_desc = "1080p (FHD)"
+            elif main_format_id in ("264", "271", "308"):
+                quality_desc = "1440p (2K)"
+            elif main_format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
+                quality_desc = "2160p (4K)"
+            else:
+                quality_desc = f"{main_format_id}"
 
             # 4. Создаём или получаем формат
             format_id = db.create_or_get_format(
