@@ -110,38 +110,66 @@ async def process_download_task(task: DownloadTask, db: VideoDatabase):
             async with aiofiles.open(filepath, 'rb') as f:
                 video_data = await f.read()
 
-            api_url = f"{BOT_API_SERVER_URL}/sendVideo"
-            data = aiohttp.FormData()
-            data.add_field('chat_id', str(chat_id))
-            data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
+            # Для аудио используем sendAudio, для видео — sendVideo
+            if task.format_code == "bestaudio":
+                api_url = f"{BOT_API_SERVER_URL}/sendAudio"
+                data = aiohttp.FormData()
+                data.add_field('chat_id', str(chat_id))
+                data.add_field('audio', video_data, filename=filepath.name, content_type='audio/mpeg')
 
-            escaped_title = title.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
-            escaped_uploader = uploader.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`') if uploader else 'Неизвестно'
+                escaped_title = title.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
+                escaped_uploader = uploader.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`') if uploader else 'Неизвестно'
 
-            caption = (
-                f"🎬 **[{escaped_title}]({url})**\\n\\n"
-                f"👤 {escaped_uploader}\\n"
-                f"⏱ Длительность: {duration_str}\\n"
-                f"📹 Качество: {task.quality_label}"
-            )
-            data.add_field('caption', caption)
-            data.add_field('parse_mode', 'Markdown')
+                caption = (
+                    f"🎵 **[{escaped_title}]({url})**\\n\\n"
+                    f"👤 {escaped_uploader}\\n"
+                    f"⏱ Длительность: {duration_str}"
+                )
+                data.add_field('caption', caption)
+                data.add_field('parse_mode', 'Markdown')
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, data=data) as response:
-                    result = await response.json()
-                    if not result.get('ok'):
-                        raise Exception(f"Bot API error: {result.get('description', 'Unknown error')}")
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(api_url, data=data) as response:
+                        result = await response.json()
+                        if result.get('ok'):
+                            file_id = result.get('result', {}).get('audio', {}).get('file_id')
+                            if file_id:
+                                task.db.set(task.video_id, task.format_code, file_id, file_size, task.quality_label, title, duration, uploader)
+                                logger.info(f"Сохранено в кэш: {task.video_id} / {task.format_code}")
+                            else:
+                                logger.error(f"Не получен file_id из Bot API Server: {result}")
+                        else:
+                            raise Exception(f"Bot API error: {result.get('description', 'Unknown error')}")
+            else:
+                api_url = f"{BOT_API_SERVER_URL}/sendVideo"
+                data = aiohttp.FormData()
+                data.add_field('chat_id', str(chat_id))
+                data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
 
-                    file_id = result.get('result', {}).get('video', {}).get('file_id')
-                    if file_id:
-                        task.db.set(
-                            task.video_id, task.format_code, file_id, file_size, task.quality_label,
-                            title, duration, uploader
-                        )
-                        logger.info(f"Сохранено в кэш: {task.video_id} / {task.format_code} → {file_id[:20]}...")
-                    else:
-                        logger.error(f"Не получен file_id из Bot API Server: {result}")
+                escaped_title = title.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
+                escaped_uploader = uploader.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`') if uploader else 'Неизвестно'
+
+                caption = (
+                    f"🎬 **[{escaped_title}]({url})**\\n\\n"
+                    f"👤 {escaped_uploader}\\n"
+                    f"⏱ Длительность: {duration_str}\\n"
+                    f"📹 Качество: {task.quality_label}"
+                )
+                data.add_field('caption', caption)
+                data.add_field('parse_mode', 'Markdown')
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(api_url, data=data) as response:
+                        result = await response.json()
+                        if result.get('ok'):
+                            file_id = result.get('result', {}).get('video', {}).get('file_id')
+                            if file_id:
+                                task.db.set(task.video_id, task.format_code, file_id, file_size, task.quality_label, title, duration, uploader)
+                                logger.info(f"Сохранено в кэш: {task.video_id} / {task.format_code}")
+                            else:
+                                logger.error(f"Не получен file_id из Bot API Server: {result}")
+                        else:
+                            raise Exception(f"Bot API error: {result.get('description', 'Unknown error')}")
 
             if task.callback_query:
                 await task.callback_query.message.delete()
@@ -151,21 +179,28 @@ async def process_download_task(task: DownloadTask, db: VideoDatabase):
             escaped_title = title.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
             escaped_uploader = uploader.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`') if uploader else 'Неизвестно'
 
-            caption = (
-                f"🎬 **[{escaped_title}]({url})**\\n\\n"
-                f"👤 {escaped_uploader}\\n"
-                f"⏱ Длительность: {duration_str}\\n"
-                f"📹 Качество: {task.quality_label}"
-            )
+            # Для аудио используем send_audio, для видео — send_video
+            if task.format_code == "bestaudio":
+                audio = FSInputFile(filepath)
+                caption = (
+                    f"🎵 **[{escaped_title}]({url})**\\n\\n"
+                    f"👤 {escaped_uploader}\\n"
+                    f"⏱ Длительность: {duration_str}"
+                )
+                msg = await task.db.bot.send_audio(chat_id, audio, caption=caption, parse_mode="Markdown")
+                task.db.set(task.video_id, task.format_code, msg.audio.file_id, file_size, task.quality_label, title, duration, uploader)
+            else:
+                video = FSInputFile(filepath)
+                caption = (
+                    f"🎬 **[{escaped_title}]({url})**\\n\\n"
+                    f"👤 {escaped_uploader}\\n"
+                    f"⏱ Длительность: {duration_str}\\n"
+                    f"📹 Качество: {task.quality_label}"
+                )
+                msg = await task.db.bot.send_video(chat_id, video, caption=caption, parse_mode="Markdown")
+                task.db.set(task.video_id, task.format_code, msg.video.file_id, file_size, task.quality_label, title, duration, uploader)
 
-            video = FSInputFile(filepath)
-            msg = await task.db.bot.send_video(chat_id, video, caption=caption, parse_mode="Markdown")
-
-            task.db.set(
-                task.video_id, task.format_code, msg.video.file_id, file_size, task.quality_label,
-                title, duration, uploader
-            )
-            logger.info(f"Сохранено в кэш: {task.video_id} / {task.format_code} → {msg.video.file_id[:20]}...")
+            logger.info(f"Сохранено в кэш: {task.video_id} / {task.format_code}")
 
             if task.callback_query:
                 await task.callback_query.message.delete()

@@ -481,41 +481,80 @@ async def handle_download_queued(callback: CallbackQuery, db: VideoDatabase, que
             async with aiofiles.open(filepath, 'rb') as f:
                 video_data = await f.read()
 
-            api_url = f"{BOT_API_SERVER_URL}/sendVideo"
-            data = aiohttp.FormData()
-            data.add_field('chat_id', str(callback.message.chat.id))
-            data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
+            # Для аудио используем sendAudio, для видео — sendVideo
+            if format_code == "bestaudio":
+                api_url = f"{BOT_API_SERVER_URL}/sendAudio"
+                data = aiohttp.FormData()
+                data.add_field('chat_id', str(callback.message.chat.id))
+                data.add_field('audio', video_data, filename=filepath.name, content_type='audio/mpeg')
 
-            caption = (
-                f"🎬 **[{escaped_title}]({url})**\n\n"
-                f"👤 {escaped_uploader}\n"
-                f"⏱ Длительность: {duration_str}\n"
-                f"📹 Качество: {quality_desc}"
-            )
-            data.add_field('caption', caption)
-            data.add_field('parse_mode', 'Markdown')
+                caption = (
+                    f"🎵 **[{escaped_title}]({url})**\n\n"
+                    f"👤 {escaped_uploader}\n"
+                    f"⏱ Длительность: {duration_str}"
+                )
+                data.add_field('caption', caption)
+                data.add_field('parse_mode', 'Markdown')
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, data=data) as response:
-                    result = await response.json()
-                    if result.get('ok'):
-                        file_id = result['result']['video']['file_id']
-                        db.set(video_db_id, format_code, file_id, file_size, quality_desc, title, duration, uploader)
-                        logger.info(f"Сохранено в кэш: {video_db_id} / {format_code}")
-                    else:
-                        raise Exception(f"Bot API error: {result.get('description')}")
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(api_url, data=data) as response:
+                        result = await response.json()
+                        if result.get('ok') and result.get('result', {}).get('audio', {}).get('file_id'):
+                            file_id = result['result']['audio']['file_id']
+                            db.set(video_db_id, format_code, file_id, file_size, quality_desc, title, duration, uploader)
+                            logger.info(f"Сохранено в кэш: {video_db_id} / {format_code}")
+                        else:
+                            error_msg = result.get('description', 'Unknown error')
+                            raise Exception(f"Bot API error: {error_msg}")
+            else:
+                api_url = f"{BOT_API_SERVER_URL}/sendVideo"
+                data = aiohttp.FormData()
+                data.add_field('chat_id', str(callback.message.chat.id))
+                data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
+
+                caption = (
+                    f"🎬 **[{escaped_title}]({url})**\n\n"
+                    f"👤 {escaped_uploader}\n"
+                    f"⏱ Длительность: {duration_str}\n"
+                    f"📹 Качество: {quality_desc}"
+                )
+                data.add_field('caption', caption)
+                data.add_field('parse_mode', 'Markdown')
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(api_url, data=data) as response:
+                        result = await response.json()
+                        if result.get('ok') and result.get('result', {}).get('video', {}).get('file_id'):
+                            file_id = result['result']['video']['file_id']
+                            db.set(video_db_id, format_code, file_id, file_size, quality_desc, title, duration, uploader)
+                            logger.info(f"Сохранено в кэш: {video_db_id} / {format_code}")
+                        else:
+                            error_msg = result.get('description', 'Unknown error')
+                            raise Exception(f"Bot API error: {error_msg}")
 
             await cleanup_file(filepath)
         else:
-            video = FSInputFile(filepath)
-            caption = (
-                f"🎬 **[{escaped_title}]({url})**\n\n"
-                f"👤 {escaped_uploader}\n"
-                f"⏱ Длительность: {duration_str}\n"
-                f"📹 Качество: {quality_desc}"
-            )
-            msg = await callback.message.answer_video(video, caption=caption, parse_mode="Markdown")
-            db.set(video_db_id, format_code, msg.video.file_id, file_size, quality_desc, title, duration, uploader)
+            # Для аудио используем send_audio, для видео — send_video
+            if format_code == "bestaudio":
+                audio = FSInputFile(filepath)
+                caption = (
+                    f"🎵 **[{escaped_title}]({url})**\n\n"
+                    f"👤 {escaped_uploader}\n"
+                    f"⏱ Длительность: {duration_str}"
+                )
+                msg = await callback.message.answer_audio(audio, caption=caption, parse_mode="Markdown")
+                db.set(video_db_id, format_code, msg.audio.file_id, file_size, quality_desc, title, duration, uploader)
+            else:
+                video = FSInputFile(filepath)
+                caption = (
+                    f"🎬 **[{escaped_title}]({url})**\n\n"
+                    f"👤 {escaped_uploader}\n"
+                    f"⏱ Длительность: {duration_str}\n"
+                    f"📹 Качество: {quality_desc}"
+                )
+                msg = await callback.message.answer_video(video, caption=caption, parse_mode="Markdown")
+                db.set(video_db_id, format_code, msg.video.file_id, file_size, quality_desc, title, duration, uploader)
+            
             db.log_request(callback.from_user.id, video_db_id, format_code, file_size, from_cache=False)
             logger.info(f"Сохранено в кэш: {video_db_id} / {format_code}")
             await cleanup_file(filepath)
