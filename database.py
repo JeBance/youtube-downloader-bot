@@ -1,18 +1,21 @@
 """
-База данных для кэширования file_id видео.
+Новая база данных для YouTube Downloader Bot.
+
+Упрощённая схема:
+- videos: основная информация о видео (одно видео = одна запись)
+- video_formats: все качества видео со статусами и telegram_file_id
+- users: пользователи
+- download_requests: история запросов для статистики
 """
 import sqlite3
-import logging
 from pathlib import Path
 from typing import Optional, List, Dict
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
 
+class VideoDatabase:
+    """Новая схема базы данных."""
 
-class VideoCache:
-    """Кэш file_id для загруженных видео."""
-    
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self._init_db()
@@ -20,7 +23,7 @@ class VideoCache:
     def _init_db(self):
         """Инициализация базы данных."""
         with sqlite3.connect(self.db_path) as conn:
-            # Таблица videos (основная)
+            # Таблица видео (основная)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS videos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,7 +36,7 @@ class VideoCache:
                 )
             """)
 
-            # Таблица video_formats
+            # Таблица форматов
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS video_formats (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,18 +53,21 @@ class VideoCache:
                     UNIQUE(video_id, format_code)
                 )
             """)
+
+            # Таблица пользователей (совместима со старой схемой)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER UNIQUE NOT NULL,
                     username TEXT,
                     first_name TEXT,
-                    language TEXT DEFAULT 'ru',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_banned INTEGER DEFAULT 0
                 )
             """)
+
+            # Таблица запросов (для статистики)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS download_requests (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,13 +76,11 @@ class VideoCache:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Индексы для скорости
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_users_banned
-                ON users(is_banned)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_download_requests_user
-                ON download_requests(user_id)
+                CREATE INDEX IF NOT EXISTS idx_videos_youtube_id
+                ON videos(youtube_video_id)
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_video_formats_video
@@ -86,24 +90,34 @@ class VideoCache:
                 CREATE INDEX IF NOT EXISTS idx_video_formats_status
                 ON video_formats(status)
             """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_video_formats_requested_by
+                ON video_formats(requested_by_user_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_download_requests_user
+                ON download_requests(user_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_users_banned
+                ON users(is_banned)
+            """)
+
             conn.commit()
 
     # ============================================================
-    # НОВЫЕ МЕТОДЫ ДЛЯ НОВОЙ СХЕМЫ (database_new.py совместимость)
+    # Методы для работы с видео (таблица videos)
     # ============================================================
 
     def get_video_by_url(self, url: str) -> Optional[Dict]:
-        """Получить видео по URL (новая схема)."""
+        """
+        Получить видео по URL.
+
+        Returns:
+            dict с id, source_url, youtube_video_id, title, uploader, duration или None
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            # Проверяем, есть ли таблица videos
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name='videos'
-            """)
-            if not cursor.fetchone():
-                return None
-            
             cursor = conn.execute(
                 "SELECT * FROM videos WHERE source_url = ?",
                 (url,)
@@ -112,37 +126,17 @@ class VideoCache:
             return dict(row) if row else None
 
     def get_video_by_youtube_id(self, youtube_id: str) -> Optional[Dict]:
-        """Получить видео по YouTube ID (новая схема)."""
+        """
+        Получить видео по YouTube ID.
+
+        Returns:
+            dict с информацией о видео или None
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name='videos'
-            """)
-            if not cursor.fetchone():
-                return None
-            
             cursor = conn.execute(
                 "SELECT * FROM videos WHERE youtube_video_id = ?",
                 (youtube_id,)
-            )
-            row = cursor.fetchone()
-            return dict(row) if row else None
-
-    def get_video_by_internal_id(self, video_id: int) -> Optional[Dict]:
-        """Получить видео по внутреннему ID записи (новая схема)."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name='videos'
-            """)
-            if not cursor.fetchone():
-                return None
-            
-            cursor = conn.execute(
-                "SELECT * FROM videos WHERE id = ?",
-                (video_id,)
             )
             row = cursor.fetchone()
             return dict(row) if row else None
@@ -155,7 +149,12 @@ class VideoCache:
         uploader: str = "",
         duration: int = 0
     ) -> int:
-        """Создать запись о видео (новая схема)."""
+        """
+        Создать запись о видео.
+
+        Returns:
+            id созданной записи или id существующей
+        """
         with sqlite3.connect(self.db_path) as conn:
             # Проверяем, нет ли уже такого видео
             cursor = conn.execute(
@@ -172,6 +171,7 @@ class VideoCache:
                 conn.commit()
                 return row[0]
 
+            # Создаём новую запись
             cursor = conn.execute("""
                 INSERT INTO videos (source_url, youtube_video_id, title, uploader, duration)
                 VALUES (?, ?, ?, ?, ?)
@@ -211,20 +211,42 @@ class VideoCache:
             conn.commit()
             return True
 
-    def get_format(self, video_id: int, format_code: str) -> Optional[Dict]:
-        """Получить формат видео (новая схема)."""
+    # ============================================================
+    # Методы для работы с форматами (таблица video_formats)
+    # ============================================================
+
+    def get_format(
+        self,
+        video_id: int,
+        format_code: str
+    ) -> Optional[Dict]:
+        """
+        Получить формат видео по ID видео и коду формата.
+
+        Returns:
+            dict с информацией о формате или None
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name='video_formats'
-            """)
-            if not cursor.fetchone():
-                return None
-            
             cursor = conn.execute(
                 "SELECT * FROM video_formats WHERE video_id = ? AND format_code = ?",
                 (video_id, format_code)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_format_by_id(self, format_id: int) -> Optional[Dict]:
+        """
+        Получить формат по его ID.
+
+        Returns:
+            dict с информацией о формате или None
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM video_formats WHERE id = ?",
+                (format_id,)
             )
             row = cursor.fetchone()
             return dict(row) if row else None
@@ -236,8 +258,14 @@ class VideoCache:
         quality_label: str,
         requested_by_user_id: int
     ) -> int:
-        """Создать или получить формат (новая схема)."""
+        """
+        Создать или получить существующий формат.
+
+        Returns:
+            id формата
+        """
         with sqlite3.connect(self.db_path) as conn:
+            # Проверяем, есть ли уже такой формат
             cursor = conn.execute(
                 "SELECT id FROM video_formats WHERE video_id = ? AND format_code = ?",
                 (video_id, format_code)
@@ -246,6 +274,7 @@ class VideoCache:
             if row:
                 return row[0]
 
+            # Создаём новый формат
             cursor = conn.execute("""
                 INSERT INTO video_formats (video_id, format_code, quality_label, requested_by_user_id)
                 VALUES (?, ?, ?, ?)
@@ -254,7 +283,12 @@ class VideoCache:
             return cursor.lastrowid
 
     def get_all_formats_for_video(self, video_id: int) -> List[Dict]:
-        """Получить все форматы для видео (новая схема)."""
+        """
+        Получить все форматы для видео.
+
+        Returns:
+            список dict с информацией о форматах
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
@@ -269,7 +303,11 @@ class VideoCache:
         telegram_file_id: str,
         telegram_file_size: int
     ) -> bool:
-        """Обновить информацию о файле Telegram (новая схема)."""
+        """
+        Обновить информацию о загруженном файле в Telegram.
+
+        Также устанавливает status='completed' и completed_at.
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 UPDATE video_formats
@@ -288,7 +326,11 @@ class VideoCache:
         status: str,
         error_message: str = None
     ) -> bool:
-        """Обновить статус формата (новая схема)."""
+        """
+        Обновить статус формата.
+
+        status: 'pending', 'downloading', 'completed', 'failed'
+        """
         with sqlite3.connect(self.db_path) as conn:
             if status == 'completed':
                 conn.execute("""
@@ -312,7 +354,12 @@ class VideoCache:
             return True
 
     def get_pending_formats(self, limit: int = 50) -> List[Dict]:
-        """Получить ожидающие форматы (новая схема)."""
+        """
+        Получить форматы, ожидающие загрузки.
+
+        Returns:
+            список форматов со status='pending' или status='downloading'
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
@@ -326,7 +373,12 @@ class VideoCache:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_user_pending_formats(self, user_id: int, limit: int = 20) -> List[Dict]:
-        """Получить ожидающие форматы пользователя (новая схема)."""
+        """
+        Получить ожидающие форматы конкретного пользователя.
+
+        Returns:
+            список форматов
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
@@ -340,353 +392,24 @@ class VideoCache:
             """, (user_id, limit))
             return [dict(row) for row in cursor.fetchall()]
 
-    def log_download_request(self, user_id: int, video_format_id: int) -> bool:
-        """Записать запрос на загрузку (новая схема)."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT INTO download_requests (user_id, video_format_id)
-                VALUES (?, ?)
-            """, (user_id, video_format_id))
-            conn.commit()
-            return True
-
-    def get_new_stats(self) -> Dict:
-        """Получить статистику по новой схеме."""
-        with sqlite3.connect(self.db_path) as conn:
-            # Проверяем наличие новых таблиц
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name='videos'
-            """)
-            if not cursor.fetchone():
-                return {}
-            
-            cursor = conn.execute("SELECT COUNT(*) FROM videos")
-            total_videos = cursor.fetchone()[0]
-
-            cursor = conn.execute("SELECT COUNT(*) FROM video_formats")
-            total_formats = cursor.fetchone()[0]
-
-            cursor = conn.execute("SELECT COUNT(*) FROM video_formats WHERE status = 'completed'")
-            completed_formats = cursor.fetchone()[0]
-
-            cursor = conn.execute("SELECT COUNT(*) FROM video_formats WHERE status = 'pending'")
-            pending_formats = cursor.fetchone()[0]
-
-            cursor = conn.execute("SELECT COALESCE(SUM(telegram_file_size), 0) FROM video_formats WHERE status = 'completed'")
-            total_size = cursor.fetchone()[0]
-
-            return {
-                "total_videos": total_videos,
-                "total_formats": total_formats,
-                "completed_formats": completed_formats,
-                "pending_formats": pending_formats,
-                "total_size": total_size
-            }
-
     # ============================================================
-    # СТАРЫЕ МЕТОДЫ (для обратной совместимости)
+    # Методы для работы с пользователями (совместимо со старой схемой)
     # ============================================================
 
-    def get(self, video_id: str, format_code: str) -> Optional[dict]:
-        """
-        Получить file_id из кэша.
-
-        Args:
-            video_id: ID видео в БД (INTEGER) или YouTube ID (TEXT)
-            format_code: код формата
-
-        Returns:
-            dict с file_id, file_size, quality_label, title, duration, uploader или None
-        """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            
-            # Проверяем, есть ли таблица video_formats (новая схема)
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name='video_formats'
-            """)
-            if cursor.fetchone():
-                # Новая схема: video_id это INTEGER ID из videos
-                try:
-                    video_id_int = int(video_id)
-                    cursor = conn.execute("""
-                        SELECT vf.telegram_file_id as file_id,
-                               vf.telegram_file_size as file_size,
-                               vf.quality_label,
-                               v.title,
-                               v.duration,
-                               v.uploader,
-                               vf.created_at
-                        FROM video_formats vf
-                        JOIN videos v ON vf.video_id = v.id
-                        WHERE vf.video_id = ? AND vf.format_code = ?
-                        AND vf.telegram_file_id IS NOT NULL
-                    """, (video_id_int, format_code))
-                    row = cursor.fetchone()
-                    
-                    if row:
-                        return {
-                            "file_id": row["file_id"],
-                            "file_size": row["file_size"],
-                            "quality_label": row["quality_label"],
-                            "title": row["title"],
-                            "duration": row["duration"],
-                            "uploader": row["uploader"],
-                            "created_at": row["created_at"]
-                        }
-                    return None
-                except (ValueError, TypeError) as e:
-                    logger.error(f"Ошибка конвертации video_id в get(): {e}")
-                    return None
-                
-            logger.error("Таблица video_formats не найдена в get()!")
-            return None
-    
-    def set(self, video_id: str, format_code: str, file_id: str,
-            file_size: int = 0, quality_label: str = "",
-            title: str = "", duration: int = 0, uploader: str = "",
-            source_url: str = "") -> bool:
-        """
-        Сохранить file_id в кэш.
-
-        Args:
-            video_id: ID видео в БД (INTEGER) или YouTube ID (TEXT)
-            format_code: код формата
-            file_id: telegram file_id
-            file_size: размер файла
-            quality_label: описание качества
-            title: заголовок видео
-            duration: длительность
-            uploader: автор
-
-        Returns:
-            True если успешно
-        """
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                # Проверяем, есть ли таблица video_formats (новая схема)
-                cursor = conn.execute("""
-                    SELECT name FROM sqlite_master
-                    WHERE type='table' AND name='video_formats'
-                """)
-                if cursor.fetchone():
-                    # Новая схема: video_id это INTEGER ID из videos
-                    try:
-                        video_id_int = int(video_id)
-                        
-                        # Находим format_id
-                        cursor = conn.execute("""
-                            SELECT id FROM video_formats
-                            WHERE video_id = ? AND format_code = ?
-                        """, (video_id_int, format_code))
-                        row = cursor.fetchone()
-                        
-                        if row:
-                            format_id = row[0]
-                            # Обновляем запись
-                            conn.execute("""
-                                UPDATE video_formats
-                                SET telegram_file_id = ?,
-                                    telegram_file_size = ?,
-                                    quality_label = ?,
-                                    status = 'completed',
-                                    completed_at = CURRENT_TIMESTAMP
-                                WHERE id = ?
-                            """, (file_id, file_size, quality_label, format_id))
-                            conn.commit()
-
-                            # Также обновляем метаданные видео если они переданы
-                            if title or uploader or duration:
-                                conn.execute("""
-                                    UPDATE videos
-                                    SET title = COALESCE(?, title),
-                                        uploader = COALESCE(?, uploader),
-                                        duration = COALESCE(?, duration)
-                                    WHERE id = ?
-                                """, (title, uploader, duration, video_id_int))
-                                conn.commit()
-
-                            logger.info(f"Обновлён формат {format_id}: telegram_file_id={file_id[:20]}...")
-                            return True
-                        else:
-                            logger.warning(f"Формат не найден: video_id={video_id_int}, format_code={format_code}")
-                            return False
-                    except (ValueError, TypeError) as e:
-                        logger.error(f"Ошибка конвертации video_id: {e}")
-                        return False
-                
-                logger.error("Таблица video_formats не найдена!")
-                return False
-        except Exception as e:
-            logger.error(f"Error saving to cache: {e}")
-            return False
-    
-    def get_all_for_video(self, video_id: str) -> list:
-        """
-        Получить все закэшированные форматы для видео.
-
-        Args:
-            video_id: ID видео в БД (INTEGER) или YouTube ID (TEXT)
-
-        Returns:
-            список (format_code, quality_label)
-        """
-        with sqlite3.connect(self.db_path) as conn:
-            # Проверяем, есть ли таблица video_formats (новая схема)
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name='video_formats'
-            """)
-            if cursor.fetchone():
-                # Новая схема: video_id это INTEGER ID из videos
-                try:
-                    video_id_int = int(video_id)
-                    cursor = conn.execute("""
-                        SELECT format_code, quality_label
-                        FROM video_formats
-                        WHERE video_id = ? AND telegram_file_id IS NOT NULL
-                    """, (video_id_int,))
-                    return [(row[0], row[1]) for row in cursor.fetchall()]
-                except (ValueError, TypeError) as e:
-                    logger.error(f"Ошибка конвертации video_id в get_all_for_video(): {e}")
-                    return []
-            
-            logger.error("Таблица video_formats не найдена в get_all_for_video()!")
-            return []
-
-    def get_url_for_video(self, video_id: str) -> Optional[str]:
-        """
-        Получить URL для видео по video_id (новая схема).
-
-        Returns:
-            URL или None
-        """
-        with sqlite3.connect(self.db_path) as conn:
-            try:
-                video_id_int = int(video_id)
-                cursor = conn.execute(
-                    "SELECT source_url FROM videos WHERE id = ?",
-                    (video_id_int,)
-                )
-                row = cursor.fetchone()
-                return row[0] if row else None
-            except (ValueError, TypeError):
-                logger.error(f"Ошибка конвертации video_id в get_url_for_video(): {e}")
-                return None
-
-    def set_url_for_video(self, video_id: str, url: str) -> bool:
-        """
-        Сохранить URL для видео (новая схема).
-
-        Returns:
-            True если успешно
-        """
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                video_id_int = int(video_id)
-                conn.execute("""
-                    UPDATE videos SET source_url = ? WHERE id = ?
-                """, (url, video_id_int))
-                conn.commit()
-            return True
-        except (ValueError, TypeError) as e:
-            logger.error(f"Ошибка конвертации video_id в set_url_for_video(): {e}")
-            return False
-    
-    def count(self) -> int:
-        """Получить количество записей в кэше (новая схема)."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM video_formats WHERE telegram_file_id IS NOT NULL")
-            return cursor.fetchone()[0]
-
-    def clear(self) -> int:
-        """
-        Очистить кэш (новая схема).
-
-        Returns:
-            количество удалённых записей
-        """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM video_formats WHERE telegram_file_id IS NOT NULL")
-            count = cursor.fetchone()[0]
-            conn.execute("UPDATE video_formats SET telegram_file_id = NULL, telegram_file_size = 0 WHERE telegram_file_id IS NOT NULL")
-            conn.commit()
-            return count
-    
-    def get_stats(self) -> dict:
-        """Получить статистику кэша (новая схема)."""
-        with sqlite3.connect(self.db_path) as conn:
-            # Количество закэшированных файлов
-            cursor = conn.execute("SELECT COUNT(*) FROM video_formats WHERE telegram_file_id IS NOT NULL")
-            total_files = cursor.fetchone()[0]
-
-            # Общий размер
-            cursor = conn.execute("SELECT COALESCE(SUM(telegram_file_size), 0) FROM video_formats WHERE telegram_file_id IS NOT NULL")
-            total_size = cursor.fetchone()[0]
-
-            # Количество уникальных видео
-            cursor = conn.execute("SELECT COUNT(DISTINCT video_id) FROM video_formats WHERE telegram_file_id IS NOT NULL")
-            total_videos = cursor.fetchone()[0]
-
-            return {
-                "total_files": total_files,
-                "total_size": total_size,
-                "total_videos": total_videos
-            }
-    
-    # === Методы для работы с пользователями ===
-    
     def add_user(self, user_id: int, username: str = None, first_name: str = None) -> bool:
         """Добавить или обновить пользователя."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO users (user_id, username, first_name, last_seen)
-                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        username = excluded.username,
-                        first_name = excluded.first_name,
-                        last_seen = CURRENT_TIMESTAMP
-                """, (user_id, username, first_name))
-                conn.commit()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO users (user_id, username, first_name, last_seen)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    first_name = excluded.first_name,
+                    last_seen = CURRENT_TIMESTAMP
+            """, (user_id, username, first_name))
+            conn.commit()
             return True
-        except Exception as e:
-            print(f"Error adding user: {e}")
-            return False
 
-    def set_user_language(self, user_id: int, language: str) -> bool:
-        """Установить предпочтительный язык для пользователя (новая схема)."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO users (user_id, language, last_seen)
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        language = excluded.language,
-                        last_seen = CURRENT_TIMESTAMP
-                """, (user_id, language))
-                conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error setting user language: {e}")
-            return False
-
-    def get_user_language(self, user_id: int) -> str:
-        """Получить предпочтительный язык пользователя (новая схема)."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute("""
-                    SELECT language FROM users
-                    WHERE user_id = ?
-                """, (user_id,))
-                row = cursor.fetchone()
-                return row[0] if row else "ru"  # По умолчанию русский
-        except Exception as e:
-            logger.error(f"Error getting user language: {e}")
-            return "ru"
-    
     def is_banned(self, user_id: int) -> bool:
         """Проверить, забанен ли пользователь."""
         with sqlite3.connect(self.db_path) as conn:
@@ -696,36 +419,22 @@ class VideoCache:
             )
             row = cursor.fetchone()
             return bool(row and row[0])
-    
+
     def ban_user(self, user_id: int) -> bool:
         """Забанить пользователя."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    "UPDATE users SET is_banned = 1 WHERE user_id = ?",
-                    (user_id,)
-                )
-                conn.commit()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
+            conn.commit()
             return True
-        except Exception as e:
-            print(f"Error banning user: {e}")
-            return False
-    
+
     def unban_user(self, user_id: int) -> bool:
         """Разбанить пользователя."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    "UPDATE users SET is_banned = 0 WHERE user_id = ?",
-                    (user_id,)
-                )
-                conn.commit()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
+            conn.commit()
             return True
-        except Exception as e:
-            print(f"Error unbanning user: {e}")
-            return False
-    
-    def get_all_users(self) -> List[dict]:
+
+    def get_all_users(self) -> List[Dict]:
         """Получить всех пользователей."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -735,83 +444,430 @@ class VideoCache:
                 ORDER BY last_seen DESC
             """)
             return [dict(row) for row in cursor.fetchall()]
-    
-    def log_request(self, user_id: int, video_id: str, format_code: str, 
-                    file_size: int = 0, from_cache: bool = False) -> bool:
-        """Записать запрос на загрузку."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO requests (user_id, video_id, format_code, file_size, from_cache)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (user_id, video_id, format_code, file_size, 1 if from_cache else 0))
-                conn.commit()
-            return True
-        except Exception as e:
-            print(f"Error logging request: {e}")
-            return False
-    
-    def get_detailed_stats(self) -> dict:
-        """Получить подробную статистику (новая схема)."""
+
+    def get_user_language(self, user_id: int) -> str:
+        """Получить предпочтительный язык пользователя."""
+        # Для совместимости со старой схемой
         with sqlite3.connect(self.db_path) as conn:
-            # Пользователи
+            # Проверяем, есть ли таблица user_settings
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='user_settings'
+            """)
+            if not cursor.fetchone():
+                return "ru"
+
+            cursor = conn.execute("""
+                SELECT setting_value FROM user_settings
+                WHERE user_id = ? AND setting_key = 'language'
+            """, (user_id,))
+            row = cursor.fetchone()
+            return row[0] if row else "ru"
+
+    def set_user_language(self, user_id: int, language: str) -> bool:
+        """Установить предпочтительный язык пользователя."""
+        with sqlite3.connect(self.db_path) as conn:
+            # Проверяем, есть ли таблица user_settings
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='user_settings'
+            """)
+            if not cursor.fetchone():
+                # Таблицы нет, создаём запись в users (для совместимости)
+                conn.execute("""
+                    INSERT INTO users (user_id, last_seen)
+                    VALUES (?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
+                """, (user_id,))
+                return True
+
+            conn.execute("""
+                INSERT OR REPLACE INTO user_settings (user_id, setting_key, setting_value)
+                VALUES (?, 'language', ?)
+            """, (user_id, language))
+            conn.commit()
+            return True
+
+    # ============================================================
+    # Методы для статистики
+    # ============================================================
+
+    def log_download_request(self, user_id: int, video_format_id: int) -> bool:
+        """Записать запрос на загрузку."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO download_requests (user_id, video_format_id)
+                VALUES (?, ?)
+            """, (user_id, video_format_id))
+            conn.commit()
+            return True
+
+    def get_stats(self) -> Dict:
+        """
+        Получить общую статистику.
+
+        Returns:
+            dict со статистикой
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            # Количество видео
+            cursor = conn.execute("SELECT COUNT(*) FROM videos")
+            total_videos = cursor.fetchone()[0]
+
+            # Количество форматов
+            cursor = conn.execute("SELECT COUNT(*) FROM video_formats")
+            total_formats = cursor.fetchone()[0]
+
+            # Загруженные форматы
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM video_formats WHERE status = 'completed'
+            """)
+            completed_formats = cursor.fetchone()[0]
+
+            # Ожидающие форматы
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM video_formats WHERE status = 'pending'
+            """)
+            pending_formats = cursor.fetchone()[0]
+
+            # Скачиваемые форматы
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM video_formats WHERE status = 'downloading'
+            """)
+            downloading_formats = cursor.fetchone()[0]
+
+            # Общий размер загруженных файлов
+            cursor = conn.execute("""
+                SELECT COALESCE(SUM(telegram_file_size), 0)
+                FROM video_formats WHERE status = 'completed'
+            """)
+            total_size = cursor.fetchone()[0]
+
+            # Количество пользователей
             cursor = conn.execute("SELECT COUNT(*) FROM users")
             total_users = cursor.fetchone()[0]
 
+            # Забаненные пользователи
             cursor = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
             banned_users = cursor.fetchone()[0]
 
-            # Запросы
+            # Количество запросов
             cursor = conn.execute("SELECT COUNT(*) FROM download_requests")
             total_requests = cursor.fetchone()[0]
 
-            # Кэш
-            cursor = conn.execute("SELECT COUNT(*) FROM video_formats WHERE telegram_file_id IS NOT NULL")
-            cached_files = cursor.fetchone()[0]
-
-            cursor = conn.execute("SELECT COALESCE(SUM(telegram_file_size), 0) FROM video_formats WHERE telegram_file_id IS NOT NULL")
-            cache_size = cursor.fetchone()[0]
-
             return {
+                "total_videos": total_videos,
+                "total_formats": total_formats,
+                "completed_formats": completed_formats,
+                "pending_formats": pending_formats,
+                "downloading_formats": downloading_formats,
+                "total_size": total_size,
                 "total_users": total_users,
                 "banned_users": banned_users,
                 "active_users": total_users - banned_users,
-                "total_requests": total_requests,
-                "cache_hits": 0,  # Больше не отслеживаем
-                "cache_misses": total_requests,
-                "cached_files": cached_files,
-                "cache_size": cache_size
+                "total_requests": total_requests
             }
 
-    def get_top_users(self, limit: int = 10) -> List[dict]:
-        """Получить топ пользователей по количеству запросов (новая схема)."""
+    def get_top_users(self, limit: int = 10) -> List[Dict]:
+        """Получить топ пользователей по количеству запросов."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
-                SELECT u.user_id, u.username, u.first_name, COUNT(dr.id) as request_count
+                SELECT u.user_id, u.username, u.first_name,
+                       COUNT(dr.id) as request_count,
+                       COUNT(DISTINCT vf.video_id) as video_count
                 FROM users u
                 LEFT JOIN download_requests dr ON u.user_id = dr.user_id
+                LEFT JOIN video_formats vf ON dr.video_format_id = vf.id
                 GROUP BY u.user_id
                 ORDER BY request_count DESC
                 LIMIT ?
             """, (limit,))
             return [dict(row) for row in cursor.fetchall()]
 
-    # === Методы для работы с очередью ===
-    # Удалены: log_queue_task, update_queue_task_status, get_user_queue, get_queue_stats
-    # Очередь теперь хранится в video_formats.status
-
-    def get_queue_stats(self) -> dict:
-        """Получить статистику очереди (новая схема)."""
+    def get_queue_stats(self) -> Dict:
+        """Получить статистику очереди."""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT status, COUNT(*) FROM video_formats GROUP BY status")
+            cursor = conn.execute("""
+                SELECT status, COUNT(*) as count
+                FROM video_formats
+                GROUP BY status
+            """)
             stats = {row[0]: row[1] for row in cursor.fetchall()}
 
             return {
                 "pending": stats.get("pending", 0),
                 "downloading": stats.get("downloading", 0),
-                "uploading": stats.get("uploading", 0),
                 "completed": stats.get("completed", 0),
                 "failed": stats.get("failed", 0),
                 "total": sum(stats.values())
             }
+
+    # ============================================================
+    # Методы для очистки
+    # ============================================================
+
+    def clear_completed_formats(self) -> int:
+        """
+        Очистить завершённые форматы.
+
+        Returns:
+            количество удалённых записей
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM video_formats WHERE status = 'completed'")
+            count = cursor.fetchone()[0]
+            conn.execute("DELETE FROM video_formats WHERE status = 'completed'")
+            conn.commit()
+            return count
+
+    def clear_all_formats(self) -> int:
+        """
+        Очистить все форматы.
+
+        Returns:
+            количество удалённых записей
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM video_formats")
+            count = cursor.fetchone()[0]
+            conn.execute("DELETE FROM video_formats")
+            conn.commit()
+            return count
+
+    def clear_all(self) -> int:
+        """
+        Очистить все данные (кроме таблицы users).
+
+        Returns:
+            количество удалённых записей
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM videos")
+            videos_count = cursor.fetchone()[0]
+            conn.execute("DELETE FROM videos")
+
+            cursor = conn.execute("SELECT COUNT(*) FROM video_formats")
+            formats_count = cursor.fetchone()[0]
+            conn.execute("DELETE FROM video_formats")
+
+            cursor = conn.execute("SELECT COUNT(*) FROM download_requests")
+            requests_count = cursor.fetchone()[0]
+            conn.execute("DELETE FROM download_requests")
+
+            conn.commit()
+            return videos_count + formats_count + requests_count
+
+
+    # ============================================================
+    # Методы для совместимости со старой версией (VideoCache)
+    # ============================================================
+
+    def get_new_stats(self) -> Dict:
+        """Получить статистику по новой схеме."""
+        return self.get_stats()
+
+    def get_detailed_stats(self) -> Dict:
+        """Получить подробную статистику."""
+        return self.get_stats()
+
+    def get_video_by_internal_id(self, video_id: int) -> Optional[Dict]:
+        """Получить видео по внутреннему ID."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM videos WHERE id = ?",
+                (video_id,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def create_video(
+        self,
+        source_url: str,
+        youtube_video_id: str,
+        title: str = "",
+        uploader: str = "",
+        duration: int = 0
+    ) -> int:
+        """Создать или получить видео."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT id FROM videos WHERE source_url = ?",
+                (source_url,)
+            )
+            row = cursor.fetchone()
+            if row:
+                # Обновляем метаданные
+                conn.execute("""
+                    UPDATE videos SET title = ?, uploader = ?, duration = ?
+                    WHERE id = ?
+                """, (title, uploader, duration, row[0]))
+                conn.commit()
+                return row[0]
+
+            cursor = conn.execute("""
+                INSERT INTO videos (source_url, youtube_video_id, title, uploader, duration)
+                VALUES (?, ?, ?, ?, ?)
+            """, (source_url, youtube_video_id, title, uploader, duration))
+            conn.commit()
+            return cursor.lastrowid
+
+    def create_or_get_format(
+        self,
+        video_id: int,
+        format_code: str,
+        quality_label: str,
+        requested_by_user_id: int
+    ) -> int:
+        """Создать или получить формат."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT id FROM video_formats WHERE video_id = ? AND format_code = ?",
+                (video_id, format_code)
+            )
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+
+            cursor = conn.execute("""
+                INSERT INTO video_formats (video_id, format_code, quality_label, requested_by_user_id)
+                VALUES (?, ?, ?, ?)
+            """, (video_id, format_code, quality_label, requested_by_user_id))
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_format(self, video_id: int, format_code: str) -> Optional[Dict]:
+        """Получить формат."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM video_formats WHERE video_id = ? AND format_code = ?",
+                (video_id, format_code)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get(self, video_id: int, format_code: str) -> Optional[Dict]:
+        """Получить файл из кэша."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT vf.telegram_file_id as file_id,
+                       vf.telegram_file_size as file_size,
+                       vf.quality_label,
+                       v.title,
+                       v.duration,
+                       v.uploader
+                FROM video_formats vf
+                JOIN videos v ON vf.video_id = v.id
+                WHERE vf.video_id = ? AND vf.format_code = ?
+                AND vf.telegram_file_id IS NOT NULL
+            """, (video_id, format_code))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
+    def set(
+        self,
+        video_id: int,
+        format_code: str,
+        telegram_file_id: str,
+        telegram_file_size: int,
+        quality_label: str,
+        title: str,
+        duration: int,
+        uploader: str
+    ) -> bool:
+        """Сохранить файл в кэш."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                UPDATE video_formats
+                SET telegram_file_id = ?,
+                    telegram_file_size = ?,
+                    status = 'completed',
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE video_id = ? AND format_code = ?
+            """, (telegram_file_id, telegram_file_size, video_id, format_code))
+            conn.commit()
+            return True
+
+    def log_request(
+        self,
+        user_id: int,
+        video_id: int,
+        format_code: str,
+        file_size: int = 0,
+        from_cache: bool = False
+    ) -> bool:
+        """Записать запрос."""
+        with sqlite3.connect(self.db_path) as conn:
+            # Получаем format_id
+            cursor = conn.execute(
+                "SELECT id FROM video_formats WHERE video_id = ? AND format_code = ?",
+                (video_id, format_code)
+            )
+            row = cursor.fetchone()
+            if row:
+                format_id = row[0]
+                conn.execute("""
+                    INSERT INTO download_requests (user_id, video_format_id)
+                    VALUES (?, ?)
+                """, (user_id, format_id))
+                conn.commit()
+            return True
+
+    def log_queue_task(
+        self,
+        user_id: int,
+        video_id: str,
+        format_code: str,
+        status: str
+    ) -> bool:
+        """Записать задачу очереди."""
+        # Для совместимости
+        return True
+
+    def update_queue_task_status(
+        self,
+        user_id: int,
+        video_id: str,
+        format_code: str,
+        status: str
+    ) -> bool:
+        """Обновить статус задачи очереди."""
+        with sqlite3.connect(self.db_path) as conn:
+            # Получаем format_id
+            cursor = conn.execute(
+                "SELECT id FROM video_formats WHERE video_id = ? AND format_code = ?",
+                (video_id, format_code)
+            )
+            row = cursor.fetchone()
+            if row:
+                format_id = row[0]
+                if status == 'completed':
+                    conn.execute("""
+                        UPDATE video_formats
+                        SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    """, (format_id,))
+                elif status == 'started':
+                    conn.execute("""
+                        UPDATE video_formats
+                        SET status = 'downloading'
+                        WHERE id = ?
+                    """, (format_id,))
+                elif status == 'pending':
+                    conn.execute("""
+                        UPDATE video_formats
+                        SET status = 'pending'
+                        WHERE id = ?
+                    """, (format_id,))
+                conn.commit()
+            return True
+
+    def clear(self) -> int:
+        """Очистить кэш."""
+        return self.clear_completed_formats()
+
