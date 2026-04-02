@@ -309,15 +309,15 @@ async def handle_download_queued(callback: CallbackQuery, db: VideoDatabase, que
                 quality_desc = "Только аудио"
             elif main_format_id in ("160", "278"):
                 quality_desc = "144p"
-            elif main_format_id in ("133", "242"):
+            elif main_format_id in ("133", "242", "299"):
                 quality_desc = "240p"
-            elif main_format_id in ("134", "243"):
+            elif main_format_id in ("134", "243", "300"):
                 quality_desc = "360p"
-            elif main_format_id in ("135", "244"):
+            elif main_format_id in ("135", "244", "298", "301"):
                 quality_desc = "480p"
-            elif main_format_id in ("136", "247"):
+            elif main_format_id in ("136", "247", "302"):
                 quality_desc = "720p (HD)"
-            elif main_format_id in ("137", "248"):
+            elif main_format_id in ("137", "248", "303"):
                 quality_desc = "1080p (FHD)"
             elif main_format_id in ("264", "271", "308"):
                 quality_desc = "1440p (2K)"
@@ -402,15 +402,15 @@ async def handle_download_queued(callback: CallbackQuery, db: VideoDatabase, que
         quality_desc = "Только аудио"
     elif main_format_id in ("160", "278"):
         quality_desc = "144p"
-    elif main_format_id in ("133", "242"):
+    elif main_format_id in ("133", "242", "299"):
         quality_desc = "240p"
-    elif main_format_id in ("134", "243"):
+    elif main_format_id in ("134", "243", "300"):
         quality_desc = "360p"
-    elif main_format_id in ("135", "244"):
+    elif main_format_id in ("135", "244", "298", "301"):
         quality_desc = "480p"
-    elif main_format_id in ("136", "247"):
+    elif main_format_id in ("136", "247", "302"):
         quality_desc = "720p (HD)"
-    elif main_format_id in ("137", "248"):
+    elif main_format_id in ("137", "248", "303"):
         quality_desc = "1080p (FHD)"
     elif main_format_id in ("264", "271", "308"):
         quality_desc = "1440p (2K)"
