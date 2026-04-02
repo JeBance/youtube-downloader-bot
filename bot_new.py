@@ -12,7 +12,7 @@ from typing import Optional, Tuple, List, Dict
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile, InlineKeyboardMarkup
+from aiogram.types import FSInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from yt_dlp import YoutubeDL
 
@@ -240,12 +240,11 @@ def build_quality_keyboard(
     Args:
         video_db_id: ID видео в БД (не YouTube ID!)
         formats: список кортежей (format_code, description, height, estimated_size)
-        cached_formats: список dict из БД с telegram_file_id
+        cached_formats: список (format_code, quality_label) уже закэшированных форматов
     """
     builder = InlineKeyboardBuilder()
 
-    # cached_formats это список dict, берём format_code из каждого
-    cached_set = set(fmt.get('format_code', '') for fmt in (cached_formats or []) if fmt.get('telegram_file_id'))
+    cached_set = set(fmt[0] for fmt in (cached_formats or []))
 
     for fmt_code, description, height, est_size in formats:
         if est_size > MAX_FILE_SIZE:
@@ -417,8 +416,10 @@ async def cmd_help(message: types.Message):
         await message.answer(
             "👑 **Команды администратора:**\n\n"
             "/clear — Очистка кэша\n"
-            "/admin — Админ-панель\n"
-            "/qstat — Статистика очереди\n\n"
+            "/stats — Подробная статистика\n"
+            "/users — Список пользователей\n"
+            "/ban, /unban — Бан/разбан пользователей\n"
+            "/broadcast — Рассылка\n\n"
             "⚙️ **Лимиты:**\n"
             f"• YouTube: ~{QUEUE_YOUTUBE_RPS} запрос/сек\n"
             f"• Telegram: ~{QUEUE_TELEGRAM_UPLOADS_PER_MIN} загрузок/мин\n"
@@ -541,11 +542,16 @@ async def cmd_cache_status(message: types.Message):
                 parse_mode="Markdown"
             )
         else:
-            # Новая схема
+            # Старая схема
             cache_stats = cache.get_stats()
-            db_stats = cache.get_detailed_stats()
+            with sqlite3.connect(cache.db_path) as conn:
+                cursor = conn.execute("SELECT COUNT(*), COUNT(DISTINCT video_id), COALESCE(SUM(file_size), 0) FROM requests")
+                row = cursor.fetchone()
+                total_downloads = row[0]
+                unique_videos_downloaded = row[1]
+                total_size_downloaded = row[2]
 
-            cache_size = cache_stats.get("total_size", 0)
+            cache_size = cache_stats["total_size"]
             if cache_size > 1024 * 1024 * 1024:
                 cache_size_str = f"{cache_size / 1024 / 1024 / 1024:.2f} GB"
             elif cache_size > 1024 * 1024:
@@ -553,16 +559,23 @@ async def cmd_cache_status(message: types.Message):
             else:
                 cache_size_str = f"{cache_size / 1024:.2f} KB"
 
+            if total_size_downloaded > 1024 * 1024 * 1024:
+                total_size_str = f"{total_size_downloaded / 1024 / 1024 / 1024:.2f} GB"
+            elif total_size_downloaded > 1024 * 1024:
+                total_size_str = f"{total_size_downloaded / 1024 / 1024:.2f} MB"
+            else:
+                total_size_str = f"{total_size_downloaded / 1024:.2f} KB"
+
             await message.answer(
                 f"📊 **Статистика:**\n\n"
                 f"💾 **Кэш Telegram:**\n"
-                f"   Видео: {cache_stats.get('total_videos', 0)}\n"
-                f"   Форматов: {cache_stats.get('total_files', 0)}\n"
+                f"   Видео: {cache_stats['total_videos']}\n"
+                f"   Форматов: {cache_stats['total_files']}\n"
                 f"   Размер: {cache_size_str}\n\n"
-                f"📥 **Загрузки:**\n"
-                f"   Запросов: {db_stats.get('total_requests', 0)}\n"
-                f"   Завершено: {cache_stats.get('completed_formats', 0)}\n"
-                f"   В очереди: {cache_stats.get('pending_formats', 0)}",
+                f"📥 **Всего загрузок:**\n"
+                f"   Запросов: {total_downloads}\n"
+                f"   Видео: {unique_videos_downloaded}\n"
+                f"   Общий размер: {total_size_str}",
                 parse_mode="Markdown"
             )
         logger.info(f"Команда /status от {message.from_user.id}")
@@ -583,8 +596,185 @@ async def cmd_cache_clear(message: types.Message):
     logger.info(f"Кэш очищен пользователем {message.from_user.id}: {count} записей")
 
 
-# === АДМИН-КОМАНДЫ УДАЛЕНЫ ===
-# Удалены команды: /stats, /broadcast, /ban, /unban, /users
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    """Обработчик команды /stats."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён!")
+        return
+
+    stats = cache.get_detailed_stats()
+    top_users = cache.get_top_users(5)
+
+    cache_size = stats["cache_size"]
+    if cache_size > 1024 * 1024 * 1024:
+        size_str = f"{cache_size / 1024 / 1024 / 1024:.2f} GB"
+    elif cache_size > 1024 * 1024:
+        size_str = f"{cache_size / 1024 / 1024:.2f} MB"
+    else:
+        size_str = f"{cache_size / 1024:.2f} KB"
+
+    total_req = stats["total_requests"]
+    cache_hit_rate = (stats["cache_hits"] / total_req * 100) if total_req > 0 else 0
+
+    text = (
+        f"📊 **Подробная статистика:**\n\n"
+        f"👥 **Пользователи:**\n"
+        f"   Всего: {stats['total_users']}\n"
+        f"   Активные: {stats['active_users']}\n"
+        f"   Забанены: {stats['banned_users']}\n\n"
+        f"📥 **Запросы:**\n"
+        f"   Всего: {stats['total_requests']}\n"
+        f"   Из кэша: {stats['cache_hits']} ({cache_hit_rate:.1f}%)\n"
+        f"   Загрузок: {stats['cache_misses']}\n\n"
+        f"💾 **Кэш:**\n"
+        f"   Файлов: {stats['cached_files']}\n"
+        f"   Размер: {size_str}\n\n"
+    )
+
+    if top_users:
+        text += "🏆 **Топ пользователей:**\n"
+        for i, user in enumerate(top_users, 1):
+            name = user.get('username') or user.get('first_name') or f"User {user['user_id']}"
+            text += f"   {i}. {name}: {user['video_count']} видео\n"
+
+    await message.answer(text, parse_mode="Markdown")
+    logger.info(f"Команда /stats от {message.from_user.id}")
+
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: types.Message):
+    """Обработчик команды /broadcast."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён!")
+        return
+
+    text = message.text.replace("/broadcast", "").strip()
+    if not text:
+        await message.answer(
+            "📢 **Рассылка всем пользователям**\n\n"
+            "Отправь текст сообщения после команды:\n"
+            "`/broadcast Текст сообщения...`\n\n"
+            "Можно использовать Markdown.",
+            parse_mode="Markdown"
+        )
+        return
+
+    users = cache.get_all_users()
+    banned_count = sum(1 for u in users if u.get('is_banned'))
+    active_users = [u for u in users if not u.get('is_banned')]
+
+    await message.answer(f"📢 Начинаю рассылку {len(active_users)} пользователям...")
+
+    success = 0
+    errors = 0
+
+    for user in active_users:
+        try:
+            await bot.send_message(
+                user['user_id'],
+                f"📢 **Сообщение от админа:**\n\n{text}",
+                parse_mode="Markdown"
+            )
+            success += 1
+        except Exception as e:
+            logger.error(f"Не удалось отправить пользователю {user['user_id']}: {e}")
+            errors += 1
+
+        await asyncio.sleep(0.1)
+
+    await message.answer(
+        f"✅ Рассылка завершена!\n\n"
+        f"Отправлено: {success}\n"
+        f"Ошибок: {errors}"
+    )
+    logger.info(f"Рассылка от {message.from_user.id}: {success} успешно, {errors} ошибок")
+
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: types.Message):
+    """Обработчик команды /ban."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён!")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "🚫 **Бан пользователя**\n\n"
+            "Использование: `/ban user_id`\n\n"
+            "Пример: `/ban 123456789`",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Неверный формат ID!")
+        return
+
+    if user_id == ADMIN_ID:
+        await message.answer("⛔ Нельзя забанить администратора!")
+        return
+
+    cache.ban_user(user_id)
+    await message.answer(f"🚫 Пользователь {user_id} забанен!")
+    logger.info(f"Пользователь {user_id} забанен админом {message.from_user.id}")
+
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: types.Message):
+    """Обработчик команды /unban."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён!")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "✅ **Разбан пользователя**\n\n"
+            "Использование: `/unban user_id`\n\n"
+            "Пример: `/unban 123456789`",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Неверный формат ID!")
+        return
+
+    cache.unban_user(user_id)
+    await message.answer(f"✅ Пользователь {user_id} разбанен!")
+    logger.info(f"Пользователь {user_id} разбанен админом {message.from_user.id}")
+
+
+@dp.message(Command("users"))
+async def cmd_users(message: types.Message):
+    """Обработчик команды /users."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён!")
+        return
+
+    users = cache.get_all_users()
+
+    if not users:
+        await message.answer("📋 Пользователей пока нет.")
+        return
+
+    text = f"👥 **Пользователи ({len(users)}):**\n\n"
+    for i, user in enumerate(users[:20], 1):
+        status = "🚫" if user.get('is_banned') else "✅"
+        name = user.get('username') or user.get('first_name') or f"User {user['user_id']}"
+        text += f"{i}. {status} {name} (`{user['user_id']}`)\n"
+
+    if len(users) > 20:
+        text += f"... и ещё {len(users) - 20} пользователей"
+
+    await message.answer(text, parse_mode="Markdown")
+    logger.info(f"Команда /users от {message.from_user.id}")
 
 
 @dp.message(Command("queue"))
@@ -858,118 +1048,6 @@ async def send_search_report(
         logger.error(f"Ошибка при отправке отчёта: {e}")
 
 
-async def send_video_from_file_id(
-    chat_id: int,
-    file_id: str,
-    title: str,
-    uploader: str,
-    duration: int,
-    quality_desc: str,
-    source_url: str
-):
-    """Отправить видео по file_id из кэша."""
-    duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
-    
-    caption = (
-        f"🎬 **[{title}]({source_url})**\n\n"
-        f"👤 {uploader}\n"
-        f"⏱ Длительность: {duration_str}\n"
-        f"📹 Качество: {quality_desc}"
-    )
-    
-    await bot.send_video(
-        chat_id,
-        video=file_id,
-        caption=caption,
-        parse_mode="Markdown"
-    )
-
-
-async def download_and_send_search_video(
-    chat_id: int,
-    video_db_id: int,
-    video_url: str,
-    format_code: str,
-    quality_desc: str,
-    title: str,
-    uploader: str,
-    duration: int
-):
-    """Скачать и отправить видео для поиска."""
-    duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
-    
-    # Скачиваем
-    filepath, downloaded_title = await download_video(video_url, format_code)
-    
-    if not filepath:
-        await bot.send_message(chat_id, f"❌ {title[:40]} — ошибка загрузки")
-        return
-    
-    file_size = filepath.stat().st_size
-    if file_size > MAX_FILE_SIZE:
-        await cleanup_file(filepath)
-        await bot.send_message(chat_id, f"❌ {title[:40]} — файл слишком большой")
-        return
-    
-    # Отправляем
-    try:
-        if BOT_API_SERVER_URL:
-            import aiohttp
-            import aiofiles
-            
-            async with aiofiles.open(filepath, 'rb') as f:
-                video_data = await f.read()
-            
-            api_url = f"{BOT_API_SERVER_URL}/sendVideo"
-            data = aiohttp.FormData()
-            data.add_field('chat_id', str(chat_id))
-            data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
-            
-            caption = (
-                f"🎬 **[{title}]({video_url})**\n\n"
-                f"👤 {uploader}\n"
-                f"⏱ Длительность: {duration_str}\n"
-                f"📹 Качество: {quality_desc}"
-            )
-            data.add_field('caption', caption)
-            data.add_field('parse_mode', 'Markdown')
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, data=data) as response:
-                    result = await response.json()
-                    if result.get('ok'):
-                        file_id = result['result']['video']['file_id']
-                        # Сохраняем в кэш
-                        cache.set(
-                            video_db_id, format_code, file_id, file_size, quality_desc,
-                            title, duration, uploader
-                        )
-                    else:
-                        raise Exception(f"Bot API error: {result.get('description')}")
-            
-            await cleanup_file(filepath)
-        else:
-            video = FSInputFile(filepath)
-            caption = (
-                f"🎬 **[{title}]({video_url})**\n\n"
-                f"👤 {uploader}\n"
-                f"⏱ Длительность: {duration_str}\n"
-                f"📹 Качество: {quality_desc}"
-            )
-            msg = await bot.send_video(chat_id, video=video, caption=caption, parse_mode="Markdown")
-            
-            cache.set(
-                video_db_id, format_code, msg.video.file_id, file_size, quality_desc,
-                title, duration, uploader
-            )
-            await cleanup_file(filepath)
-            
-    except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
-        await cleanup_file(filepath)
-        await bot.send_message(chat_id, f"❌ {title[:40]} — ошибка отправки: {e}")
-
-
 async def process_search_results(
     user_id: int,
     chat_id: int,
@@ -977,82 +1055,69 @@ async def process_search_results(
     shorts: List[dict],
     query: str
 ):
-    """Обрабатывает результаты поиска: добавляет до 10 видео + 10 shorts в очередь БД."""
+    """Обрабатывает результаты поиска: добавляет видео в очередь."""
     total_added = 0
     total_failed = 0
 
     all_items = []
 
-    # Добавляем видео (до 10)
-    for video in videos[:10]:
+    for video in videos:
         all_items.append({
             'url': video['url'],
             'id': video['id'],
             'title': video['title'],
-            'uploader': video.get('uploader', 'Неизвестно'),
-            'duration': video.get('duration', 0),
-            'type': 'video'
+            'type': 'video',
+            'duration': video.get('duration', 0)
         })
 
-    # Добавляем shorts (до 10)
-    for short in shorts[:10]:
+    for short in shorts:
         all_items.append({
             'url': short['url'],
             'id': short['id'],
             'title': short['title'],
-            'uploader': short.get('uploader', 'Неизвестно'),
-            'duration': short.get('duration', 0),
-            'type': 'shorts'
+            'type': 'shorts',
+            'duration': short.get('duration', 0)
         })
 
-    logger.info(f"Добавляю {len(all_items)} видео из поиска в очередь БД")
-
-    await bot.send_message(
-        chat_id,
-        f"⏳ **Добавление в очередь...**\\n\\n"
-        f"Найдено видео: {len(videos)}\\n"
-        f"Найдено shorts: {len(shorts)}\\n"
-        f"Будет добавлено: {len(all_items)}",
-        parse_mode="Markdown"
-    )
+    logger.info(f"Добавляю {len(all_items)} видео из поиска в очередь")
 
     for idx, item in enumerate(all_items):
         try:
             logger.info(f"Обработка [{idx+1}/{len(all_items)}]: {item['type']} - {item['title'][:50]}")
 
-            # 1. Создаём или получаем видео из БД
-            video_db_id = cache.create_video(
-                source_url=item['url'],
-                youtube_video_id=item['id'],
-                title=item['title'],
-                uploader=item['uploader'],
-                duration=item['duration']
-            )
-
-            # 2. Получаем информацию о видео для определения форматов
             info = get_video_info(item['url'])
+
             if not info:
-                logger.warning(f"Не удалось получить информацию: {item['url']}")
+                logger.warning(f"Не удалось получить информацию о видео: {item['url']}")
                 total_failed += 1
                 continue
 
-            # 3. Получаем доступные форматы
             formats = info.get('formats', [])
             available = get_available_formats(
                 formats,
                 max_size_mb=MAX_FILE_SIZE // 1024 // 1024,
-                max_height=720  # Для поиска ограничиваем 720p
+                max_height=720
             )
 
             if not available:
-                logger.warning(f"Нет доступных форматов: {item['url']}")
+                logger.warning(f"Нет доступных форматов для видео: {item['url']}")
                 total_failed += 1
                 continue
 
             format_code, description, height, est_size = available[0]
             quality_desc = description.split(' (')[0] if ' (' in description else description
 
-            # 4. Создаём или получаем формат со статусом 'pending'
+            # === НОВАЯ ЛОГИКА С БД ===
+            # 1. Создаём или получаем видео из БД
+            video_db_id = cache.create_video(
+                source_url=item['url'],
+                youtube_video_id=item['id'],
+                title=item['title'],
+                uploader=item.get('uploader', 'Неизвестно'),
+                duration=item.get('duration', 0)
+            )
+
+            # 2. Создаём или получаем формат
             format_id = cache.create_or_get_format(
                 video_id=video_db_id,
                 format_code=format_code,
@@ -1060,29 +1125,49 @@ async def process_search_results(
                 requested_by_user_id=user_id
             )
 
-            # 5. Обновляем статус на 'pending' (если вдруг был создан как completed)
-            cache.update_format_status(format_id, 'pending')
+            # 3. Создаём задачу для очереди
+            task = DownloadTask(
+                task_id=f"search_{item['id']}_{format_code}_{int(datetime.now().timestamp())}_{total_added}",
+                user_id=user_id,
+                username=f"search_{user_id}",
+                video_url=item['url'],
+                video_id=item['id'],
+                format_code=format_code,
+                quality_label=quality_desc,
+                callback_query=None
+            )
 
-            total_added += 1
-            await asyncio.sleep(0.2)  # Небольшая задержка
+            # 4. Добавляем в очередь
+            added = await queue_mgr.add_task(task)
+
+            if added:
+                cache.log_queue_task(user_id, item['id'], format_code, "pending")
+                total_added += 1
+                logger.info(f"Задача добавлена в очередь: {task.task_id}")
+            else:
+                logger.warning(f"Не удалось добавить задачу в очередь: {item['id']}")
+                total_failed += 1
+
+            await asyncio.sleep(0.3)
 
         except Exception as e:
-            logger.error(f"Ошибка при добавлении {item['type']}: {e}", exc_info=True)
+            logger.error(f"Ошибка при добавлении {item['type']} в очередь: {e}", exc_info=True)
             total_failed += 1
 
-    logger.info(f"Поиск завершён: добавлено {total_added} видео, ошибок: {total_failed}")
+    logger.info(f"Поиск завершён: добавлено {total_added} видео в очередь, ошибок: {total_failed}")
 
-    # Финальное сообщение
-    await bot.send_message(
-        chat_id,
-        f"✅ **Добавлено в очередь!**\\n\\n"
-        f"Видео: {total_added}\\n"
-        f"Ошибок: {total_failed}\\n\\n"
-        f"📹 Видео будут отправлены по мере загрузки.",
-        parse_mode="Markdown"
-    )
+    try:
+        await bot.send_message(
+            chat_id,
+            f"✅ **Добавлено в очередь:** {total_added} видео\n\n"
+            f"📹 Видео будут отправлены по мере загрузки.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отправить сообщение о статусе очереди: {e}")
 
 
+@dp.message(F.text)
 async def handle_url(message: types.Message):
     """Обработчик ссылок на YouTube."""
     url = message.text.strip()
@@ -1137,29 +1222,15 @@ async def handle_url(message: types.Message):
         duration=duration
     )
 
-    # 2. Сохраняем форматы в БД если их там нет
-    for fmt_code, description, height, est_size in available:
-        # Извлекаем quality_label из description (убираем размер)
-        quality_label = description.split(' (')[0] if ' (' in description else description
-        cache.create_or_get_format(
-            video_id=video_db_id,
-            format_code=fmt_code,
-            quality_label=quality_label,
-            requested_by_user_id=message.from_user.id
-        )
-
-    # 3. Получаем все форматы из БД (теперь они там есть)
+    # 2. Получаем все форматы из БД
     cached_formats = cache.get_all_formats_for_video(video_db_id)
     logger.info(f"Найдено {len(cached_formats)} закэшированных форматов для видео {video_db_id}")
 
-    # 4. Создаём клавиатуру с video_db_id
+    # 3. Создаём клавиатуру с video_db_id вместо youtube_video_id
     keyboard = build_quality_keyboard(video_db_id, available, cached_formats)
 
-    # Сохраняем URL в БД
-    cache.set_url_for_video(video_db_id, url)
-
     caption = (
-        f"🎬 **[{title}]({url})**\n\n"
+        f"🎬 **{title}**\n\n"
         f"👤 {uploader}\n"
         f"⏱ Длительность: {duration_str}\n\n"
         f"**Выберите качество:**"
@@ -1173,14 +1244,9 @@ async def handle_url(message: types.Message):
     logger.info(f"Показаны варианты качества для видео {video_db_id}")
 
 
-# === handle_download УДАЛЁН — используется handle_download_queued ===
-# @dp.callback_query(F.data.startswith("download_"))
-# async def handle_download(callback: types.CallbackQuery):
-
-
 @dp.callback_query(F.data.startswith("download_"))
-async def handle_download_queued(callback: types.CallbackQuery):
-    """Обработчик выбора качества с добавлением в очередь."""
+async def handle_download(callback: types.CallbackQuery):
+    """Обработчик выбора качества."""
     callback_data = callback.data
 
     if not callback_data.startswith("download_"):
@@ -1193,6 +1259,7 @@ async def handle_download_queued(callback: types.CallbackQuery):
         await callback.answer("❌ Ошибка формата", show_alert=True)
         return
 
+    # video_db_id - это ID видео в БД (не YouTube ID!)
     video_db_id = int(remainder[:last_underscore])
     format_code = remainder[last_underscore + 1:]
 
@@ -1234,21 +1301,17 @@ async def handle_download_queued(callback: types.CallbackQuery):
 
         # Получаем данные из БД videos, а не из кэша
         video_info = cache.get_video_by_internal_id(video_db_id)
-        logger.info(f"video_info из get_video_by_internal_id({video_db_id}): {video_info}")
         if not video_info:
             video_info = cache.get_video_by_youtube_id(cached.get("video_id", ""))
-            logger.info(f"video_info из get_video_by_youtube_id: {video_info}")
 
         if video_info:
             title = video_info.get('title', cached.get('title', 'Видео'))
             duration = video_info.get('duration', cached.get('duration', 0))
             uploader = video_info.get('uploader') or cached.get('uploader', 'Неизвестно')
-            logger.info(f"Из БД: title={title}, uploader={uploader}")
         else:
             title = cached.get('title', 'Видео')
             duration = cached.get('duration', 0)
             uploader = cached.get('uploader', 'Неизвестно')
-            logger.warning(f"Видео не найдено в БД, используем кэш: uploader={uploader}")
 
         duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
 
@@ -1273,58 +1336,60 @@ async def handle_download_queued(callback: types.CallbackQuery):
                 cached.get("file_size", 0), from_cache=True
             )
             await callback.message.delete()
-            await callback.answer("✅ Отправлено из кэша")
+            await callback.answer("✅ Отправлено")
         except Exception as e:
             logger.error(f"Ошибка отправки из кэша: {e}")
             await callback.answer("❌ Ошибка при отправке из кэша", show_alert=True)
         return
 
-    # Получаем URL из БД
-    video_info = cache.get_video_by_internal_id(video_db_id)
-    if not video_info:
-        logger.error(f"Не найдено видео по internal ID {video_db_id}")
-        # Пробуем найти по youtube_id (на случай если там старый ID)
-        video_info = cache.get_video_by_youtube_id(str(video_db_id))
-    
-    if not video_info:
-        logger.error(f"Не найден URL для видео {video_db_id}")
-        await callback.answer("❌ Ошибка: видео не найдено в БД", show_alert=True)
-        return
+    # Определяем описание качества
+    main_format_id = format_code.split('+')[0]
 
-    url = video_info["source_url"]
-
-    # === СНАЧАЛА ПРОВЕРЯЕМ БД — ТАМ СОХРАНЁН ПРАВИЛЬНЫЙ quality_label ===
-    cached_format = cache.get_format(video_db_id, format_code)
-    quality_desc = None
-    if cached_format and cached_format.get('quality_label'):
-        quality_desc = cached_format['quality_label']
-        logger.info(f"Взято quality_label из БД: {quality_desc}")
-    
-    # Если в БД нет, определяем по format_id
-    if not quality_desc:
-        main_format_id = format_code.split('+')[0]
-
-        if format_code == "bestaudio":
-            quality_desc = "Только аудио"
-        elif main_format_id in ("160", "278", "298"):
-            quality_desc = "144p"
-        elif main_format_id in ("133", "242", "299"):
-            quality_desc = "240p"
-        elif main_format_id in ("134", "243", "300"):
-            quality_desc = "360p"
-        elif main_format_id in ("135", "244", "301"):
-            quality_desc = "480p"
-        elif main_format_id in ("136", "247", "302"):
-            quality_desc = "720p (HD)"
-        elif main_format_id in ("137", "248", "303"):
-            quality_desc = "1080p (FHD)"
-        elif main_format_id in ("264", "271", "308"):
-            quality_desc = "1440p (2K)"
-        elif main_format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
-            quality_desc = "2160p (4K)"
-        else:
-            quality_desc = f"{main_format_id}p"
-        logger.warning(f"quality_label не найдено в БД, определили как: {quality_desc}")
+    if format_code == "bestaudio":
+        quality_desc = "Только аудио"
+    elif main_format_id in ("160", "278"):
+        quality_desc = "144p"
+    elif main_format_id in ("133", "242"):
+        quality_desc = "240p"
+    elif main_format_id in ("134", "243"):
+        quality_desc = "360p"
+    elif main_format_id in ("135", "244"):
+        quality_desc = "480p"
+    elif main_format_id in ("136", "247"):
+        quality_desc = "720p (HD)"
+    elif main_format_id in ("137", "248"):
+        quality_desc = "1080p (FHD)"
+    elif main_format_id in ("264", "271", "308"):
+        quality_desc = "1440p (2K)"
+    elif main_format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
+        quality_desc = "2160p (4K)"
+    else:
+        info = get_video_info(url)
+        if info and 'formats' in info:
+            for fmt in info['formats']:
+                if fmt.get('format_id') == main_format_id:
+                    height = fmt.get('height', 0)
+                    if height >= 4320:
+                        quality_desc = "4320p (8K)"
+                    elif height >= 2160:
+                        quality_desc = "2160p (4K)"
+                    elif height >= 1440:
+                        quality_desc = "1440p (2K)"
+                    elif height >= 1080:
+                        quality_desc = "1080p (FHD)"
+                    elif height >= 720:
+                        quality_desc = "720p (HD)"
+                    elif height >= 480:
+                        quality_desc = "480p"
+                    elif height >= 360:
+                        quality_desc = "360p"
+                    elif height >= 240:
+                        quality_desc = "240p"
+                    else:
+                        quality_desc = "144p"
+                    break
+        if quality_desc == main_format_id:
+            quality_desc = f"{main_format_id} (неизвестно)"
 
     size_match = re.search(r'\((\d+) MB\)', callback.message.text)
     size_info = f" (~{size_match.group(1)} MB)" if size_match else ""
@@ -1510,14 +1575,11 @@ async def process_download_task(task: DownloadTask):
     try:
         video_id_int = int(task.video_id)
         video_info = cache.get_video_by_internal_id(video_id_int)
-        logger.info(f"Получено video_info по internal ID {video_id_int}: {video_info}")
     except (ValueError, TypeError):
         video_info = None
-        logger.warning(f"Не удалось конвертировать task.video_id={task.video_id} в int")
-
+    
     if not video_info:
         video_info = cache.get_video_by_youtube_id(str(task.video_id))
-        logger.info(f"Получено video_info по YouTube ID {task.video_id}: {video_info}")
 
     # Если видео нет в БД, пробуем получить из кэша
     if not video_info:
@@ -1529,20 +1591,10 @@ async def process_download_task(task: DownloadTask):
         else:
             uploader = 'Неизвестно'
             duration = 0
-        logger.warning(f"Видео не найдено в БД, используем metadata из кэша")
     else:
         title = video_info.get('title', title or 'Видео')
         duration = video_info.get('duration', 0)
         uploader = video_info.get('uploader') or 'Неизвестно'
-        logger.info(f"Видео найдено в БД: title={title}, uploader={uploader}")
-
-    # Обновляем данные в БД videos (title, uploader могли измениться)
-    try:
-        video_id_int = int(task.video_id)
-        cache.update_video_metadata(video_id_int, title=title, uploader=uploader)
-        logger.info(f"Обновлены метаданные видео {video_id_int}: title={title}, uploader={uploader}")
-    except (ValueError, TypeError) as e:
-        logger.warning(f"Не удалось обновить метаданные: {e}")
 
     duration_str = f"{int(duration) // 60}:{int(duration) % 60:02d}" if duration else "N/A"
 
@@ -1564,7 +1616,6 @@ async def process_download_task(task: DownloadTask):
             data.add_field('video', video_data, filename=filepath.name, content_type='video/mp4')
 
             if task.callback_query is None:
-                # Задача из поиска — добавляем кликабельную ссылку
                 caption = (
                     f"🎬 **[{title}]({url})**\n\n"
                     f"👤 {uploader}\n"
@@ -1572,9 +1623,8 @@ async def process_download_task(task: DownloadTask):
                     f"📹 Качество: {task.quality_label}"
                 )
             else:
-                # Обычная задача — тоже добавляем ссылку
                 caption = (
-                    f"🎬 **[{title}]({url})**\n\n"
+                    f"🎬 **{title}**\n\n"
                     f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
@@ -1605,7 +1655,6 @@ async def process_download_task(task: DownloadTask):
             video = FSInputFile(filepath)
 
             if task.callback_query is None:
-                # Задача из поиска — добавляем кликабельную ссылку
                 caption = (
                     f"🎬 **[{title}]({url})**\n\n"
                     f"👤 {uploader}\n"
@@ -1613,9 +1662,8 @@ async def process_download_task(task: DownloadTask):
                     f"📹 Качество: {task.quality_label}"
                 )
             else:
-                # Обычная задача — тоже добавляем ссылку
                 caption = (
-                    f"🎬 **[{title}]({url})**\n\n"
+                    f"🎬 **{title}**\n\n"
                     f"👤 {uploader}\n"
                     f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
@@ -1743,7 +1791,7 @@ async def handle_download_queued(callback: types.CallbackQuery):
         user_id=callback.from_user.id,
         username=callback.from_user.username or str(callback.from_user.id),
         video_url=url,
-        video_id=str(video_db_id),  # internal ID как строка
+        video_id=str(video_db_id),
         format_code=format_code,
         quality_label=quality_desc,
         callback_query=callback
@@ -1755,7 +1803,7 @@ async def handle_download_queued(callback: types.CallbackQuery):
         callback.from_user.id, str(video_db_id), format_code, "pending"
     )
 
-    # Получаем данные из БД videos для сообщения о загрузке
+    # Получаем данные из БД videos
     video_info = cache.get_video_by_internal_id(video_db_id)
     if not video_info:
         video_info = cache.get_video_by_youtube_id(str(video_db_id))
