@@ -296,35 +296,41 @@ async def handle_download_queued(callback: CallbackQuery, db: VideoDatabase, que
         await callback.answer("🚫 Вы заблокированы администратором!", show_alert=True)
         return
 
-    # Проверяем кэш в БД
-    cached = db.get(video_db_id, format_code)
-    if cached and cached.get('telegram_file_id'):
-        # Уже есть в кэше — отправляем по file_id
-        logger.info(f"Отправка из кэша: {video_db_id} / {format_code}")
+    # Определяем quality_desc для кнопки
+    main_format_id = format_code.split('+')[0]
+    if format_code == "bestaudio":
+        quality_desc = "Только аудио"
+    elif main_format_id in ("160", "278"):
+        quality_desc = "144p"
+    elif main_format_id in ("133", "242", "299"):
+        quality_desc = "240p"
+    elif main_format_id in ("134", "243", "300"):
+        quality_desc = "360p"
+    elif main_format_id in ("135", "244", "298", "301"):
+        quality_desc = "480p"
+    elif main_format_id in ("136", "247", "302"):
+        quality_desc = "720p (HD)"
+    elif main_format_id in ("137", "248", "303"):
+        quality_desc = "1080p (FHD)"
+    elif main_format_id in ("264", "271", "308"):
+        quality_desc = "1440p (2K)"
+    elif main_format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
+        quality_desc = "2160p (4K)"
+    else:
+        quality_desc = f"{main_format_id}"
 
-        quality_desc = cached.get("quality_label", "")
-        if not quality_desc or quality_desc == format_code or quality_desc.isdigit():
-            main_format_id = format_code.split('+')[0]
-            if format_code == "bestaudio":
-                quality_desc = "Только аудио"
-            elif main_format_id in ("160", "278"):
-                quality_desc = "144p"
-            elif main_format_id in ("133", "242", "299"):
-                quality_desc = "240p"
-            elif main_format_id in ("134", "243", "300"):
-                quality_desc = "360p"
-            elif main_format_id in ("135", "244", "298", "301"):
-                quality_desc = "480p"
-            elif main_format_id in ("136", "247", "302"):
-                quality_desc = "720p (HD)"
-            elif main_format_id in ("137", "248", "303"):
-                quality_desc = "1080p (FHD)"
-            elif main_format_id in ("264", "271", "308"):
-                quality_desc = "1440p (2K)"
-            elif main_format_id in ("266", "313", "315", "396", "397", "398", "399", "400", "401", "402"):
-                quality_desc = "2160p (4K)"
-            else:
-                quality_desc = main_format_id
+    # Проверяем кэш по quality_label, а не по format_code
+    # (YouTube может выдавать разные format_id для одного качества)
+    all_formats = db.get_all_formats_for_video(video_db_id)
+    cached = None
+    for fmt in all_formats:
+        if fmt.get('quality_label') == quality_desc and fmt.get('telegram_file_id'):
+            cached = fmt
+            break
+    
+    if cached:
+        # Уже есть в кэше — отправляем по file_id
+        logger.info(f"Отправка из кэша: {video_db_id} / {quality_desc}")
 
         # Получаем данные из БД videos
         video_info = db.get_video_by_internal_id(video_db_id)
