@@ -41,15 +41,17 @@ def build_quality_keyboard(
     """
     builder = InlineKeyboardBuilder()
 
-    # cached_formats это список dict из БД, берём quality_label оттуда
-    cached_dict = {fmt.get('format_code'): fmt.get('quality_label') for fmt in (cached_formats or [])}
+    # cached_formats это список dict из БД
+    # Проверяем наличие telegram_file_id, а не просто наличие в БД
+    cached_set = set(fmt.get('format_code') for fmt in (cached_formats or []) if fmt.get('telegram_file_id'))
+    cached_labels = {fmt.get('format_code'): fmt.get('quality_label') for fmt in (cached_formats or [])}
 
     for fmt_code, description, height, est_size in formats:
         if est_size > MAX_FILE_SIZE:
             continue
 
         # Берём quality_label из БД (если есть) или определяем по format_id
-        quality_label = cached_dict.get(fmt_code)
+        quality_label = cached_labels.get(fmt_code)
         if not quality_label:
             main_format_id = fmt_code.split('+')[0]
             if fmt_code == "bestaudio":
@@ -79,7 +81,7 @@ def build_quality_keyboard(
 
         button_text = f"{quality_label}{size_str}"
 
-        if fmt_code in cached_dict:
+        if fmt_code in cached_set:
             builder.button(
                 text=f"✅ {button_text}",
                 callback_data=f"download_{video_db_id}_{fmt_code}"
