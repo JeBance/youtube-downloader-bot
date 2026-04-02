@@ -408,9 +408,9 @@ async def handle_download_queued(callback: CallbackQuery, db: VideoDatabase, que
         escaped_uploader = uploader.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`') if uploader else 'Неизвестно'
 
         caption = (
-            f"🎬 **[{escaped_title}]({url})**\\n\\n"
-            f"👤 {escaped_uploader}\\n"
-            f"⏱ Длительность: {duration_str}\\n"
+            f"🎬 **[{escaped_title}]({url})**\n\n"
+            f"👤 {escaped_uploader}\n"
+            f"⏱ Длительность: {duration_str}\n"
             f"📹 Качество: {quality_desc}"
         )
 
