@@ -121,8 +121,8 @@ async def process_download_task(task: DownloadTask, db: VideoDatabase):
                 escaped_uploader = uploader.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`') if uploader else 'Неизвестно'
 
                 caption = (
-                    f"🎵 **[{escaped_title}]({url})**\\n\\n"
-                    f"👤 {escaped_uploader}\\n"
+                    f"🎵 **[{escaped_title}]({url})**\n\n"
+                    f"👤 {escaped_uploader}\n"
                     f"⏱ Длительность: {duration_str}"
                 )
                 data.add_field('caption', caption)
@@ -150,9 +150,9 @@ async def process_download_task(task: DownloadTask, db: VideoDatabase):
                 escaped_uploader = uploader.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`') if uploader else 'Неизвестно'
 
                 caption = (
-                    f"🎬 **[{escaped_title}]({url})**\\n\\n"
-                    f"👤 {escaped_uploader}\\n"
-                    f"⏱ Длительность: {duration_str}\\n"
+                    f"🎬 **[{escaped_title}]({url})**\n\n"
+                    f"👤 {escaped_uploader}\n"
+                    f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
                 )
                 data.add_field('caption', caption)
@@ -183,8 +183,8 @@ async def process_download_task(task: DownloadTask, db: VideoDatabase):
             if task.format_code == "bestaudio":
                 audio = FSInputFile(filepath)
                 caption = (
-                    f"🎵 **[{escaped_title}]({url})**\\n\\n"
-                    f"👤 {escaped_uploader}\\n"
+                    f"🎵 **[{escaped_title}]({url})**\n\n"
+                    f"👤 {escaped_uploader}\n"
                     f"⏱ Длительность: {duration_str}"
                 )
                 msg = await task.db.bot.send_audio(chat_id, audio, caption=caption, parse_mode="Markdown")
@@ -192,9 +192,9 @@ async def process_download_task(task: DownloadTask, db: VideoDatabase):
             else:
                 video = FSInputFile(filepath)
                 caption = (
-                    f"🎬 **[{escaped_title}]({url})**\\n\\n"
-                    f"👤 {escaped_uploader}\\n"
-                    f"⏱ Длительность: {duration_str}\\n"
+                    f"🎬 **[{escaped_title}]({url})**\n\n"
+                    f"👤 {escaped_uploader}\n"
+                    f"⏱ Длительность: {duration_str}\n"
                     f"📹 Качество: {task.quality_label}"
                 )
                 msg = await task.db.bot.send_video(chat_id, video, caption=caption, parse_mode="Markdown")
